@@ -2,6 +2,13 @@
 
 <p align="center">The open-source AI job search agent.</p>
 
+> ### ⚡ Autonomous Software Engineer Job Application Agent
+> Read the complete **[Software Engineer Agent Setup & User Guide](GUIDE/README.md)** to configure autonomous job discovery, browser autofill, 2FA OTP solving, and interactive pipeline tracking:
+> - **[Step-by-Step Setup Guide](GUIDE/SETUP.md)**: Node.js, Playwright, OpenRouter & Mail.app / Gmail OTP reader.
+> - **[Candidate Onboarding Questionnaire](GUIDE/ONBOARDING-QUESTIONS.md)**: Required profile, demographic, and work authorization questions.
+> - **[Operational Workflows](GUIDE/WORKFLOWS.md)**: How to find jobs with 1-5 YOE filters, auto-apply end-to-end, and launch the dashboard (`./tracker-dashboard.sh`).
+> - **Automated Onboarding**: Run `node setup-profile.mjs` to configure your profile interactively.
+
 <p align="center">
   <a href="README.md">English</a> |
   <a href="README.es.md">Español</a> |
