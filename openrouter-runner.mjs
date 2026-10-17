@@ -49,7 +49,7 @@ let activeModel = null;
 // in test-all.mjs) must NOT mutate process.env — a module-level loader here
 // leaked every .env key (including CAREER_OPS_CLI) into the importing process
 // and broke later CLI-resolution tests.
-function loadEnvFile() {
+export function loadEnvFile() {
   const envPath = path.join(__dirname, '.env');
   if (!fs.existsSync(envPath)) return;
   for (const line of fs.readFileSync(envPath, 'utf-8').split('\n')) {
@@ -123,7 +123,8 @@ async function loadFreeModels() {
 
   try {
     const resp = await fetch(OPENROUTER_MODELS_URL, {
-      headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` }
+      headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` },
+      signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
@@ -235,7 +236,7 @@ export function buildCachedSystemMessage(systemPrompt) {
 // ---------------------------------------------------------------------------
 // OpenRouter API call — automatic model rotation with fallback
 // ---------------------------------------------------------------------------
-async function callOpenRouter(systemPrompt, userMessage) {
+async function callOpenRouter(systemPrompt, userMessage, { maxAttempts = Infinity } = {}) {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) {
     throw new Error(
@@ -302,7 +303,8 @@ async function callOpenRouter(systemPrompt, userMessage) {
   const active = models.filter(m => !blacklistedModels.has(m));
   if (active.length === 0) throw new Error('All loaded models have been blacklisted this session.');
 
-  for (let attempt = 0; attempt < active.length; attempt++) {
+  const attemptLimit = Math.min(active.length, Math.max(1, Number(maxAttempts) || active.length));
+  for (let attempt = 0; attempt < attemptLimit; attempt++) {
     const model = active[(modelIndex % active.length + attempt) % active.length];
     activeModel = model;
     process.stdout.write(`[model] ${model} ... `);
@@ -384,7 +386,7 @@ async function callOpenRouter(systemPrompt, userMessage) {
     }
   }
 
-  throw new Error(`All ${active.length} active models failed. Last error: ${lastError?.message}`);
+  throw new Error(`All ${attemptLimit} attempted models failed. Last error: ${lastError?.message}`);
 }
 
 // Exported so tests/openrouter-runner-429-reset.test.mjs can script fetch()

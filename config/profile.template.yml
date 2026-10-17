@@ -1,0 +1,98 @@
+# Career-Ops Profile Configuration Template for Software Engineers
+# Copy this file to config/profile.yml and fill in your details, or run:
+# node setup-profile.mjs
+
+candidate:
+  full_name: "Jane Doe"
+  title: "Backend / Software Engineer"
+  email: "jane.doe@example.com"
+  phone: "+1-555-0199"
+  location: "San Francisco, CA, USA"
+  city: "San Francisco"
+  state: "California"
+  country: "United States"
+  address: "San Francisco, CA, United States"
+  postal_code: "94105"
+  resume_path: "/path/to/your/resume.pdf"
+  linkedin: "https://linkedin.com/in/janedoe"
+  portfolio_url: "https://janedoe.dev"
+  github: "https://github.com/janedoe"
+  photo: ""
+  photo_style: rounded
+  demographics:
+    gender: "Woman"
+    gender_identity: "Woman"
+    transgender: "No"
+    disability: "No"
+    neurodivergent: "No"
+    ethnicity: "White"
+    race: "White"
+    sexual_orientation: "Heterosexual"
+    veteran_status: "No"
+    pronouns: "she/her/hers"
+    name_pronunciation: "Jane Doe"
+    years_of_experience: 3.0
+    yoe_display: "3 years"
+    notice_period: "30 days"
+    earliest_start_date: "30 days notice period"
+    previously_employed: "No"
+    non_compete: "No"
+    referral_source: "Company Career Page"
+    manager_notified: "Yes"
+
+target_roles:
+  experience_range:
+    min_years: 1
+    max_years: 5
+    strict_policy: "Only find and apply to roles requiring 1 to 5 years of experience. Any role requiring > 5 years is strictly excluded."
+  primary:
+    - "Backend Engineer"
+    - "Software Engineer"
+    - "Distributed Systems Engineer"
+    - "Go Engineer / Golang Developer"
+    - "Java Backend Engineer"
+    - "Platform / Infrastructure Engineer"
+    - "Site Reliability Engineer (SRE)"
+    - "Member of Technical Staff (MTS)"
+    - "AI Systems / Agentic Engineer"
+  archetypes:
+    - name: "Backend / Distributed Systems"
+      level: "Mid (1-5 YOE)"
+      fit: "primary"
+    - name: "Platform / Infrastructure Engineer"
+      level: "Mid (1-5 YOE)"
+      fit: "primary"
+    - name: "Agentic AI / Applied AI Engineer"
+      level: "Mid (1-5 YOE)"
+      fit: "secondary"
+    - name: "Full Stack Engineer"
+      level: "Mid (1-5 YOE)"
+      fit: "adjacent"
+
+compensation:
+  target_range: "Open to competitive market compensation"
+  currency: "USD / EUR / GBP / CAD"
+  minimum: "Negotiable based on location, equity, and sponsorship"
+  location_flexibility: "Worldwide Remote or International Onsite with Visa Sponsorship"
+  salary_form_policy:
+    strategy: "If salary range is stated on JD, submit the lower bound; else use defaults below"
+    international_default_numeric: 120000
+    india_default_numeric: 2500000
+    text_default: "Competitive / Market benchmarked"
+
+location:
+  country: "United States"
+  city: "San Francisco"
+  timezone: "PST"
+  visa_status: "US Citizen. Open to worldwide remote and onsite roles."
+  authorized_in: ["United States"]
+  needs_sponsorship: false
+  onsite_availability: "Onsite or Remote"
+  preferred_locations:
+    - "Worldwide Remote"
+    - "United States"
+    - "Europe"
+    - "United Kingdom"
+
+language:
+  output: en
