@@ -997,6 +997,12 @@ async function attachResume(page, profile) {
   if (attached) console.log(`  ✔ Attached resume file to ${attached} application attachment field${attached === 1 ? '' : 's'}.`);
   else if (alreadyAttached) console.log('  ✔ Required resume attachment is already populated.');
   else console.warn('  ⚠ No suitable resume attachment input was found; automatic submit will be blocked if resume is required.');
+  // Surface the widget's own visible state: some boards (Lever) parse the
+  // upload asynchronously and the chip/section text is what the user reviews.
+  for (const { input } of targets) {
+    const widgetText = await input.evaluate(el => (el.closest('.application-question, .field, .form-field, [class*="resume" i], div')?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 120)).catch(() => '');
+    if (widgetText) console.log(`  ℹ Resume widget: ${widgetText}`);
+  }
 }
 
 async function waitForResumeParsing(page) {
