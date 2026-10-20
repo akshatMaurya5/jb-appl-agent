@@ -22,6 +22,7 @@ import { checkLivenessViaApi } from './liveness-api.mjs';
 import { findFaqAnswer, readReusableFaq, recordApplicationFaq } from './lib/application-faq.mjs';
 import { answerQuestion, explicitApplicationAnswer } from './lib/form-answer-engine.mjs';
 import { mandatoryCoverageLoop, verifyRounds } from './lib/form-verify.mjs';
+import { watchdogConfig, raceWithDeadline, killJobPage, recordApplyFailure } from './lib/watchdog.mjs';
 import { isPlaceholderChoice, isRegisteredLocationSelection, selectedValueMatches, uniqueLocationSuggestion, uniqueOptionMatch } from './lib/autofill-form-utils.mjs';
 import {
   normalize, isUnsafeChoiceContext, requiresExplicitDecision,
@@ -308,6 +309,7 @@ async function planVisibleForm(page, profile, cv, target, pageForbidsGeneratedCo
     for (const [key, value] of preparedAnswers) if (!answers.has(key)) answers.set(key, value);
     for (const [key, value] of preparedChoices) if (!choices.has(key)) choices.set(key, value);
     target._preparedFormPlan = { answers: [...answers], choices: [...choices] };
+    target._plannerUsed = true;
     target._faqQuestions = [...(target._faqQuestions || []), ...collectFaqItems(answers, choices)];
     console.log(`  ℹ Drafted ${answers.size} supported text answer(s) and ${choices.size} supported option choice(s) before filling.`);
     return { inventory, answers, choices, radio: radioPlan };
@@ -1641,9 +1643,10 @@ async function submitAndVerify(page, target, profile, cv) {
     console.log(`  ✔ Saved ${unique.size} application question(s) in FAQS.md.`);
   };
   const startedAt = target._startedAt || Date.now();
-  const remainingMs = Math.max(0, 300000 - (Date.now() - startedAt));
+  const watchdog = watchdogConfig(profile);
+  const remainingMs = Math.max(0, watchdog.job_timeout_seconds * 1000 - (Date.now() - startedAt));
   if (!remainingMs) {
-    console.warn(`  ⏱ Stopping at ${target.name || target.url}: application form was not ready within five minutes; leaving the tab open for review.`);
+    console.warn(`  ⏱ Stopping at ${target.name || target.url}: application form was not ready within ${watchdog.job_timeout_seconds}s; leaving the tab open for review.`);
     return false;
   }
   let prepTimer;
@@ -1692,7 +1695,7 @@ async function submitAndVerify(page, target, profile, cv) {
     console.warn(`  ⚠ ATS validation blocked submission; review the open form: ${validationErrors.join('; ')}`);
     return false;
   }
-  const deadline = Date.now() + 600000;
+  const deadline = Date.now() + watchdog.confirm_deadline_seconds * 1000;
   let verificationAttempted = false;
   let followUpAttempts = 0;
   let captchaAnnounced = false;
@@ -1848,6 +1851,7 @@ async function resolveTargets(args) {
 async function run() {
   const autoSubmit = !process.argv.includes('--prepare-only');
   const profile = loadCandidateProfile();
+  const watchdog = watchdogConfig(profile);
   const cv = cvText();
   const requestedTargets = await resolveTargets(process.argv.slice(2));
   const targets = [];
@@ -1879,7 +1883,6 @@ async function run() {
     console.log(`\n[${i + 1}/${targets.length}] Preparing ${target.name}: ${target.url}`);
     const page = i === 0 ? (context.pages()[0] || await context.newPage()) : await context.newPage();
     let diagnosticTimer;
-    let timeoutTimer;
     const fillTask = fillFormForPage(page, target, profile, cv);
     const diagnosticTask = new Promise(resolve => {
       diagnosticTimer = setTimeout(async () => {
@@ -1888,19 +1891,25 @@ async function run() {
       }, 90000);
     });
     target._diagnosticTimer = diagnosticTimer;
-    const fillResult = await Promise.race([
-      fillTask,
-      new Promise(resolve => { timeoutTimer = setTimeout(() => resolve('__job_timeout__'), 300000); }),
-    ]);
-    clearTimeout(timeoutTimer);
-    if (fillResult === '__job_timeout__') {
+    const fillResult = await raceWithDeadline(fillTask, watchdog.job_timeout_seconds * 1000);
+    if (fillResult === '__watchdog_timeout__') {
       clearTimeout(diagnosticTimer);
-      console.warn(`  ⏱ Stopping at ${target.name || target.url}: form filling exceeded five minutes; leaving the tab open for review.`);
-      break;
+      console.warn(`  ⏱ Watchdog: ${target.name || target.url} exceeded the ${watchdog.job_timeout_seconds}s fill budget; killing the tab and moving on.`);
+      await killJobPage(page);
+      recordApplyFailure(DATA_ROOT, {
+        company: target.company || target.name, role: target.role || target.title, url: target.url,
+        reason: 'job-timeout', phase: 'fill', elapsedMs: Date.now() - target._startedAt, plannerAvailable: Boolean(target._plannerUsed),
+      });
+      continue;
     }
     if (!fillResult) {
       clearTimeout(diagnosticTimer);
       console.warn(`  ⏸ Skipping ${target.name || target.url}; no usable application form was prepared.`);
+      await killJobPage(page);
+      recordApplyFailure(DATA_ROOT, {
+        company: target.company || target.name, role: target.role || target.title, url: target.url,
+        reason: 'no-form', phase: 'fill', elapsedMs: Date.now() - target._startedAt, plannerAvailable: Boolean(target._plannerUsed),
+      });
       continue;
     }
     // Keep the 90-second watchdog active through the submit-step search. If
@@ -1908,8 +1917,13 @@ async function run() {
     if (autoSubmit) {
       const submitted = await submitAndVerify(page, target, profile, cv);
       if (!submitted) {
-        console.warn(`  ⏸ Stopping the batch at ${target.name || target.url}; this application was not confirmed submitted.`);
-        break;
+        console.warn(`  ⏸ ${target.name || target.url} was not confirmed submitted; killing the tab and moving on.`);
+        await killJobPage(page);
+        recordApplyFailure(DATA_ROOT, {
+          company: target.company || target.name, role: target.role || target.title, url: target.url,
+          reason: 'unconfirmed-submission', phase: 'submit-confirm', elapsedMs: Date.now() - target._startedAt, plannerAvailable: Boolean(target._plannerUsed),
+        });
+        continue;
       }
     } else {
       if (!(await hasSubmitAction(page)) && !target._diagnosed) {
@@ -1923,6 +1937,11 @@ async function run() {
     }
     clearTimeout(diagnosticTimer);
     void diagnosticTask;
+  }
+  if (autoSubmit) {
+    console.log('\nAll application attempts finished; closing the browser.');
+    await browser.close().catch(() => {});
+    return;
   }
   console.log('\nBrowser is being left open for visual verification. Close it manually when finished.');
   await new Promise(() => {});
