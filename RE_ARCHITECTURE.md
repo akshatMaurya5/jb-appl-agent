@@ -340,26 +340,40 @@ approvals.
   submit → mock OTP `entered` → confirmation. Exit 0 = full pass, zero PII.
 - **Live supervised `--prepare-only` runs** (fill + coverage report, NO
   submit, browser left open for review):
-  - Lever (Palantir, London): 56 controls inventoried; all fields filled
-    (identity, links, essays, languages, radios, consent). **Gap found:** the
-    Lever location combobox did not uniquely match "Bengaluru, Karnataka,
-    India" (Lever lists many `city, India` options, so the country tier is not
-    unique) — left unresolved for review; see §14.
-  - Ashby (Supabase, Remote Global): _(result pending — see below)_
-  - Greenhouse (Affirm, Remote Spain — visa sponsorship provided):
-    _(result pending — see below)_
+  - Lever (Palantir, London): 56 controls inventoried; identity, links,
+    essays, languages, radios, consent all filled, 100% mandatory coverage.
+    Found: the Lever location combobox did not uniquely match "Bengaluru,
+    Karnataka, India" (fixed in §14.1); marketing-consent checkbox correctly
+    left for human review by design.
+  - Ashby (Supabase, Remote Global): 12 controls, all filled (8 text fields,
+    referral-source radio, age-18 YesNo, resume attached), verify loop clean.
+    The planner correctly refused to invent a cross-vendor CLI and the
+    deterministic tiers covered everything.
+  - Greenhouse (Affirm, Remote Spain — visa sponsorship provided): 18
+    controls, 100% mandatory coverage. The visa/eligibility cluster answered
+    deterministically — "work remotely from Spain…" authorization question,
+    "If you are not an EU citizen, what is your citizenship?" → India, Yes/No
+    sponsorship combos from `needs_sponsorship: true`. Found: phone-country
+    combobox clicked "India +91" but the registration check read back "India"
+    (fixed in §14.2).
 - `node test-all.mjs`: all suites green except `openrouter-runner-429-reset`
   (fork drift — the 429/blacklist code is byte-identical to `main`; not part
   of this re-architecture).
 
 ## 14. Known gaps / next work
 
-1. **Lever location combobox** (found in the live run above): the
-   city→state→country fallback needs a "most specific unique country-scoped
-   match" tier or a Lever-specific suggestion strategy.
-2. Watchdog demo on a deliberately hung fixture (kill at 3 min + ledger row +
+1. **Lever location combobox** (found in the live run above) — fixed:
+   `locationSuggestionWithFallback` now scopes a non-unique country match by
+   the candidate's city/state and the posting's city (so one "London, United
+   Kingdom" wins among many "…, United Kingdom" entries), and the failure
+   warning now lists the suggestions the board actually offered. Needs a
+   supervised Lever re-run to confirm.
+2. **Phone-country combobox registration** (found on Greenhouse) — fixed:
+   `registeredOptionMatches` strips trailing dial codes and accepts
+   containment, so "India +91" registering as "India" counts as selected.
+3. Watchdog demo on a deliberately hung fixture (kill at 3 min + ledger row +
    advance) — pending a fixture.
-3. One supervised live submission with real OTP on a test posting (the
+4. One supervised live submission with real OTP on a test posting (the
    user's call — will pick a real opening and test end-to-end).
-4. `data/apply-failures.tsv` tracker-note write-back is note-only by design;
+5. `data/apply-failures.tsv` tracker-note write-back is note-only by design;
    a future UI could surface the ledger in the dashboard.

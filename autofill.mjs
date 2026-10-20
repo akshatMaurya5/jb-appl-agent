@@ -23,7 +23,7 @@ import { answerQuestion, explicitApplicationAnswer } from './lib/form-answer-eng
 import { mandatoryCoverageLoop, verifyRounds } from './lib/form-verify.mjs';
 import { watchdogConfig, raceWithDeadline, killJobPage, recordApplyFailure } from './lib/watchdog.mjs';
 import { runOtpFlow } from './lib/otp-flow.mjs';
-import { isPlaceholderChoice, isRegisteredLocationSelection, locationSuggestionWithFallback, selectedValueMatches, uniqueLocationSuggestion, uniqueOptionMatch } from './lib/autofill-form-utils.mjs';
+import { isPlaceholderChoice, isRegisteredLocationSelection, locationSuggestionWithFallback, registeredOptionMatches, selectedValueMatches, uniqueLocationSuggestion, uniqueOptionMatch } from './lib/autofill-form-utils.mjs';
 import {
   normalize, isUnsafeChoiceContext, requiresExplicitDecision,
   approvedLegalAcknowledgementOptions, locationOptionMatches, privacyAcknowledgementOptions,
@@ -316,7 +316,7 @@ async function fillSemanticFields(page, profile, cv, target) {
           index,
           text: (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim(),
         })).filter(option => option.text));
-        const fallback = locationSuggestionWithFallback(suggestionInfo, profile);
+        const fallback = locationSuggestionWithFallback(suggestionInfo, profile, target.location);
         if (fallback) {
           const match = fallback.match;
           await suggestions.nth(match.index).click();
@@ -327,7 +327,8 @@ async function fillSemanticFields(page, profile, cv, target) {
             console.warn(`  ⚠ Lever location suggestion did not register as a selection: ${match.text}`);
           }
         } else {
-          console.warn(`  ⚠ No unique Lever location suggestion matched ${[profile.city, profile.state, profile.country].filter(Boolean).join(', ')}; leaving it unresolved.`);
+          const sample = suggestionInfo.slice(0, 5).map(option => option.text).join(' | ');
+          console.warn(`  ⚠ No unique Lever location suggestion matched ${[profile.city, profile.state, profile.country].filter(Boolean).join(', ')}; leaving it unresolved. Suggestions seen: ${sample || '(none)'}`);
         }
       }
       continue;
@@ -525,7 +526,7 @@ async function fillSemanticFields(page, profile, cv, target) {
             const container = node.closest('.select__control, .select-shell, .select__container, fieldset, .field, .form-field') || node.parentElement?.parentElement;
             return container?.querySelector('.select__single-value, [class*="singleValue"], [class*="single-value"], [data-selected="true"]')?.textContent?.trim() || '';
           }).catch(() => '');
-          if (normalize(registered) === normalize(match[0].text)) console.log(`  ✔ Selected combobox option: ${match[0].text}`);
+          if (registeredOptionMatches(registered, match[0].text)) console.log(`  ✔ Selected combobox option: ${match[0].text}`);
           else console.warn(`  ⚠ Combobox did not register the selected option: ${match[0].text}`);
         }
       }
