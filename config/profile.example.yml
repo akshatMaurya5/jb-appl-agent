@@ -95,6 +95,18 @@ location:
   # For remote roles outside your country:
   # onsite_availability: "1 week/month in any city"
 
+# Optional. Only set this when your answer to a standard eligibility question
+# is a policy choice rather than something derivable from location: it takes
+# precedence over the answer engine's country-by-country logic.
+# form_answers:
+#   # "Are you legally authorized to work in the country for which you are
+#   # applying?" — used for every posting when set.
+#   work_authorization: "Yes"
+#   # Common pairing for candidates who answer Yes above and need sponsorship
+#   # outside their own country: set location.needs_sponsorship: true so the
+#   # "require sponsorship" question answers Yes outside your country and No
+#   # inside it.
+
 # Optional. Only read by the Singapore market mode (modes/sg/): your work
 # status there. One of: citizen | pr | pass-holder | foreign. Omit → the mode
 # treats you as foreign (Employment Pass sponsorship required) and says so.
