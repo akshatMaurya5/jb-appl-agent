@@ -23,6 +23,7 @@ import { findFaqAnswer, readReusableFaq, recordApplicationFaq } from './lib/appl
 import { answerQuestion, explicitApplicationAnswer } from './lib/form-answer-engine.mjs';
 import { mandatoryCoverageLoop, verifyRounds } from './lib/form-verify.mjs';
 import { watchdogConfig, raceWithDeadline, killJobPage, recordApplyFailure } from './lib/watchdog.mjs';
+import { runOtpFlow } from './lib/otp-flow.mjs';
 import { isPlaceholderChoice, isRegisteredLocationSelection, selectedValueMatches, uniqueLocationSuggestion, uniqueOptionMatch } from './lib/autofill-form-utils.mjs';
 import {
   normalize, isUnsafeChoiceContext, requiresExplicitDecision,
@@ -1391,11 +1392,11 @@ async function visibleFormValidationErrors(page) {
   }).catch(() => []);
 }
 
-function fetchVerificationCode(sinceEpoch, company) {
+function fetchVerificationCode(sinceEpoch, company, { maxWaitSeconds = 120 } = {}) {
   const mailPath = resolve(ROOT, 'tools/fetch-verification-code-mail.py');
   try {
-    const out = execFileSync('python3', [mailPath, '--json', '--since-epoch', String(sinceEpoch), '--max-wait', '120', '--interval', '10', '--company', company || ''], {
-      encoding: 'utf8', timeout: 130000, env: process.env,
+    const out = execFileSync('python3', [mailPath, '--json', '--since-epoch', String(sinceEpoch), '--max-wait', String(maxWaitSeconds), '--interval', '10', '--company', company || ''], {
+      encoding: 'utf8', timeout: maxWaitSeconds * 1000 + 10000, env: process.env,
     });
     const result = JSON.parse(out.trim());
     if (result?.code) return result;
@@ -1738,21 +1739,43 @@ async function submitAndVerify(page, target, profile, cv) {
     const codeInputs = await detectCodeInputs(page);
     if (codeInputs.length && !verificationAttempted) {
       verificationAttempted = true;
-      console.log('  🔐 Verification challenge detected; checking for a new application code.');
-      const result = fetchVerificationCode(submittedAt, target.company || target.name);
-      if (!result?.code) { console.warn('  ⚠ No matching fresh verification code found. The tab remains open for review.'); return false; }
-      const entered = await enterVerificationCode(codeInputs, result.code);
-      if (!entered) { console.warn('  ⚠ Verification code was not fully present in the input boxes; leaving the tab open without submitting the code.'); return false; }
-      const verify = await verificationActionFor(page, codeInputs[0]);
-      try {
-        if (verify && await verify.isVisible().catch(() => false) && !await verify.isDisabled().catch(() => true)) await verify.click({ timeout: 5000 });
-        else if (await codeInputs[0].evaluate(el => el.form?.querySelector('button[type="submit"],input[type="submit"]') !== null).catch(() => false)) await codeInputs[0].press('Enter');
-        else { console.warn('  ⚠ Could not identify the verification action; the tab remains open.'); return false; }
-      } catch (error) {
-        console.warn(`  ⚠ Could not activate the verification action: ${error.message}; the tab remains open.`);
+      console.log('  🔐 Verification challenge detected; running the OTP flow.');
+      const otp = await runOtpFlow({
+        detectInputs: () => detectCodeInputs(page),
+        fetchCode: (sinceEpoch, company) => Promise.resolve(fetchVerificationCode(sinceEpoch, company, { maxWaitSeconds: watchdog.otp_poll_seconds })),
+        enterCode: (inputs, code) => enterVerificationCode(inputs, code),
+        clickVerify: async inputs => {
+          const verify = await verificationActionFor(page, inputs[0]);
+          try {
+            if (verify && await verify.isVisible().catch(() => false) && !await verify.isDisabled().catch(() => true)) { await verify.click({ timeout: 5000 }); return true; }
+            if (await inputs[0].evaluate(el => el.form?.querySelector('button[type="submit"],input[type="submit"]') !== null).catch(() => false)) { await inputs[0].press('Enter'); return true; }
+            console.warn('  ⚠ Could not identify the verification action.');
+            return false;
+          } catch (error) {
+            console.warn(`  ⚠ Could not activate the verification action: ${error.message}`);
+            return false;
+          }
+        },
+        followUpSubmit: async () => {
+          const nextSubmit = await findSubmitButton(page);
+          if (!nextSubmit || !(await nextSubmit.isVisible().catch(() => false))) return false;
+          if (await nextSubmit.isDisabled().catch(() => true)) return false;
+          await nextSubmit.scrollIntoViewIfNeeded().catch(() => {});
+          await nextSubmit.click({ timeout: 4000 }).catch(() => {});
+          console.log('  ⏳ Clicked a post-verification submit action.');
+          return true;
+        },
+        isConfirmed: () => confirmedSubmission(page),
+        company: target.company || target.name || '',
+        submittedAt,
+        otpPollSeconds: watchdog.otp_poll_seconds,
+        confirmDeadlineMs: deadline,
+      });
+      if (otp.status === 'no-code') {
+        console.warn('  ⚠ No verification code arrived within the OTP budget; killing the job and moving on.');
         return false;
       }
-      await page.waitForTimeout(3000);
+      if (otp.status === 'entered') { await page.waitForTimeout(3000); continue; }
       continue;
     }
     // Check if a follow-up form step or new submit action appeared (multi-step wizard)
