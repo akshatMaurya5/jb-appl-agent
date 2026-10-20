@@ -128,7 +128,10 @@ const PROVIDERS_DIR = path.resolve(CODE_ROOT, 'providers');
 // module must stay side-effect free: a sibling that only reads a constant used
 // to leave a stray data/ in whatever cwd it ran from.
 
-const CONCURRENCY = 10;
+// Per-board concurrency. Public ATS APIs tolerate a wider fan-out than the
+// original 10; CAREER_OPS_SCAN_CONCURRENCY lets a local fast pass raise it
+// without changing the default for scheduled scans.
+const CONCURRENCY = Math.max(1, Number(process.env.CAREER_OPS_SCAN_CONCURRENCY) || 10);
 
 export function isIgnorableDirectoryFsyncError(err, platform = process.platform) {
   return ['EINVAL', 'ENOTSUP', 'ENOSYS'].includes(err?.code)

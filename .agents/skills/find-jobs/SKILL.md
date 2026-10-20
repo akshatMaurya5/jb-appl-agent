@@ -39,24 +39,33 @@ This skill finds new, active software engineering opportunities outside India ta
 4. **Strict Deduplication:**
    - Check `data/applications.md`, `data/pipeline.md`, and `data/scan-history.tsv`.
    - Never surface a URL or company/role that has already been discovered, evaluated, or applied to.
-5. **Liveness & JD Experience Verification:**
-   - Verify that the ATS job link is live and accepts applications (via `check-liveness.mjs` or direct API check).
-   - Inspect the JD text to verify required experience is strictly within the 1–5 years range before presenting.
+5. **Liveness & JD Experience Verification (fast path — no browser):**
+   - Listings come from the ATS's own public API (`scan.mjs`), so a returned posting is live by construction; do NOT run `check-liveness.mjs` per job.
+   - JD text for the shortlist comes from the same ATS API through `fetch-jd.mjs` (Greenhouse/Lever/Ashby/Workday/SmartRecruiters/Zoho). Only postings explicitly requiring >5 YOE, or onsite roles with no sponsorship/relocation signal, are rejected before presentation.
+   - Never fall back to a web search or a browser page-load per posting — that is what made the old flow slow.
 6. **Autonomous Application Compatibility Guard:**
    - When finding jobs intended for `/apply-job all` autonomous execution, exclude postings whose forms explicitly forbid AI-assisted completion (such as Canonical's mandatory 'answer in your own words / no AI tools' policy accompanied by proprietary high-school score essays) or require original unassisted coding take-homes. Under sequential batch rules, such forms pause required fields for human entry and intentionally stop the batch.
 
-## Workflow Execution
-1. Read existing URLs from `data/applications.md`, `data/pipeline.md`, and `data/scan-history.tsv`.
-2. Discover fresh postings via ATS APIs (Greenhouse, Ashby, Lever) or web search matching target keywords and location criteria.
-3. Filter out any already-tracked URLs.
-4. Write newly discovered jobs to:
-   - `data/last-found-jobs.json` as `[{ "index": 1, "name": "Company", "role": "Role", "url": "URL", "location": "Location" }, ...]`.
-     *(This guarantees that a subsequent `/apply-job all` or `/apply-job <number>` applies strictly to this new batch).*
-   - `data/pipeline.md` under `## Pending` as `- [ ] {url} — {Company} ({Role}, {Location})`
-   - `data/scan-history.tsv` to ensure persistent deduplication across runs.
-5. Present the results to the user as a clean numbered list:
-   - **[1] Company — Role Title**
-     - **Location & Visa/Remote:** e.g., Paris, France (Full Visa Sponsorship & Relocation)
-     - **Tech Stack & Alignment:** Specific match with candidate's background
-     - **Application Link:** Direct ATS application URL
-6. Remind the user that they can apply to all of these newly found jobs by saying `/apply-job all`, or apply to a single one via `/apply-job <number>`.
+## Workflow Execution (fast path)
+
+Do NOT run web searches and do NOT open each posting in a browser. One command does discovery, dedup, relevance ranking, and the 1–5 YOE/onsite-sponsorship check:
+
+```bash
+node find-jobs.mjs 5 --since 14
+```
+
+- **Count:** first positional argument (default `find_jobs.count` in `portals.yml`, 5).
+- **Custom keywords:** `--keywords "kafka,payment,fintech"` boosts matching titles for this run.
+- **Wider window:** `--since 30`.
+- **No rescan:** `--no-scan` ranks the existing `## Pending` pipeline.
+
+What the command does, in order (zero LLM tokens, no browser):
+1. `scan.mjs` fetches every enabled ATS board concurrently through its public API, applies `title_filter` / `location_filter` / `country_eligibility_filter` / `visa_filter` / blacklist, dedups against `data/applications.md`, `data/pipeline.md`, and `data/scan-history.tsv`, then appends new postings to the pipeline and history.
+2. Only the postings added by THIS run are ranked: matched `title_filter` keyword specificity, remote/worldwide wording, visa-sponsorship/relocation wording, and any `--keywords` bonus. Onsite-India roles are dropped.
+3. The top `count × find_jobs.shortlist_multiplier` are checked against JD text from `fetch-jd.mjs` (ATS API). A posting is rejected when the JD explicitly requires more than 5 years, an onsite role has no sponsorship/relocation signal, or a remote role is restricted to a country the candidate is not in.
+4. The accepted top N are written to `data/last-found-jobs.json` as `[{ index, name, company, role, title, url, location, score, yoe, reason }]` — this is exactly the batch `/apply-job all` consumes.
+5. It prints a numbered list with location, YOE signal, and the match reason.
+
+Then present the printed list and remind the user: `/apply-job all` for this batch, or `/apply-job <number>` for one.
+
+Typical runtime: ~60–90 seconds for the scan plus ~15 seconds for the shortlist, versus several minutes of web search + per-posting browser loads.
