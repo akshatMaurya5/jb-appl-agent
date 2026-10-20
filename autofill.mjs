@@ -15,9 +15,8 @@ import { mergeTracker } from './merge-tracker.mjs';
 import { parseTrackerRow, resolveColumns } from './tracker-parse.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { normalizeUrl } from './url-key.mjs';
-import { callOpenRouter } from './openrouter-runner.mjs';
-import { loadEnvFile, requestChatAgentFormPlan } from './lib/chat-agent-form-plan.mjs';
-import { callActiveAgentFormPlanner } from './lib/active-agent-form-planner.mjs';
+import { loadEnvFile } from './lib/chat-agent-form-plan.mjs';
+import { callFormPlanner } from './lib/planner-dispatch.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
 import { findFaqAnswer, readReusableFaq, recordApplicationFaq } from './lib/application-faq.mjs';
 import { answerQuestion, explicitApplicationAnswer } from './lib/form-answer-engine.mjs';
@@ -82,35 +81,6 @@ function cvText() {
 function escapeCssAttribute(value) { return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"'); }
 function urlKey(s) { return normalizeUrl(String(s || '')) || normalize(s); }
 
-async function callFormPlanner(systemPrompt, userMessage, options = {}) {
-  const validate = response => !options.validateResponse || options.validateResponse(response.content);
-  if (process.env.CAREER_OPS_NATIVE_SUBAGENT === '1') {
-    const response = await requestChatAgentFormPlan(systemPrompt, userMessage, {
-      validateResponse: content => !options.validateResponse || options.validateResponse(content),
-    });
-    if (!validate(response)) throw new Error('The native agent returned an invalid answer plan.');
-    return response;
-  }
-  try {
-    const response = await callOpenRouter(systemPrompt, userMessage, options);
-    if (!validate(response)) throw new Error('OpenRouter returned an invalid answer plan.');
-    return response;
-  } catch (openRouterError) {
-    console.warn(`  ↪ OpenRouter unavailable for form planning; trying the active agent CLI: ${openRouterError.message}`);
-    if (activeAgentDisabled) throw openRouterError;
-    console.log('  ⏳ Active-agent planner processing form answers...');
-    try {
-      const response = await callActiveAgentFormPlanner(systemPrompt, userMessage);
-      if (!validate(response)) throw new Error('The active-agent fallback returned an invalid answer plan.');
-      return response;
-    } catch (activeAgentError) {
-      activeAgentDisabled = true;
-      console.warn(`  ↪ Active agent CLI unavailable for form planning (${activeAgentError.message}); continuing with profile-backed answers.`);
-      throw activeAgentError;
-    }
-  }
-}
-let activeAgentDisabled = false;
 
 // Facade over lib/form-answer-engine.mjs: explicit per-company answers →
 // category-deterministic profile facts → FAQ similarity. The native
@@ -1239,8 +1209,9 @@ async function hasSubmitAction(page) {
 async function diagnoseStuckForm(page, target, profile, cv, elapsedMs) {
   if (target._diagnosed) return;
   target._diagnosed = true;
+  let fields = [];
   try {
-    const fields = await page.evaluate(() => {
+    fields = await page.evaluate(() => {
       const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
       return [...document.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"]), textarea, select, [role="combobox"]')]
         .filter(visible).map(el => {
@@ -1277,7 +1248,12 @@ async function diagnoseStuckForm(page, target, profile, cv, elapsedMs) {
       console.warn(`    • ${item.field || 'Field'}: ${item.issue || 'blocker'}; expected answer: ${item.expected_answer || 'not supported'}; remedy: ${item.remedy || 'review field'}`);
     }
   } catch (error) {
-    console.warn(`  ⚠ Could not get stuck-form diagnosis: ${error.message}`);
+    // No native planner: degrade to a plain field dump so the human or the
+    // failure ledger still sees what was on the form.
+    console.warn(`  ⚠ Could not get stuck-form diagnosis (${error.message}); dumping the visible field state instead:`);
+    for (const field of fields) {
+      console.warn(`    • ${field.label.slice(0, 80)} [${field.input_type}]${field.required ? ' required' : ''}${field.filled ? '' : ' EMPTY'}${field.options.length ? ` options: ${field.options.join(' / ').slice(0, 120)}` : ''}`);
+    }
   }
 }
 
