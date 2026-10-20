@@ -46,6 +46,38 @@ This skill finds new, active software engineering opportunities outside India ta
 6. **Autonomous Application Compatibility Guard:**
    - When finding jobs intended for `/apply-job all` autonomous execution, exclude postings whose forms explicitly forbid AI-assisted completion (such as Canonical's mandatory 'answer in your own words / no AI tools' policy accompanied by proprietary high-school score essays) or require original unassisted coding take-homes. Under sequential batch rules, such forms pause required fields for human entry and intentionally stop the batch.
 
+## Search Parameters (edit `portals.yml`, not this skill)
+
+**Role families.** The machine-readable source is `portals.yml → title_filter.positive`, kept in sync with `modes/_profile.md` → "Expanded Title Taxonomy & Synonyms for Discovery":
+- **Software Engineer / Developer:** Software Engineer (I/II/III/IV), Software Developer, Software Development Engineer (SDE, SDE I/II/III), SWE, Member of Technical Staff (MTS, SMTS), Application Engineer, Systems Developer.
+- **Backend / Server-Side:** Backend Engineer/Developer, Back-End Engineer, Server-Side Engineer, Backend Systems/Infrastructure/Platform, API Engineer, Microservices Engineer.
+- **Java / JVM:** Java Engineer/Developer, Java Backend/Systems/Platform/Microservices, JVM Engineer, Spring Boot, Core Java.
+- **Go / Golang:** Go/Golang Engineer, Developer, Backend, Systems, Platform, Infrastructure.
+- **Distributed Systems / Systems Software:** Distributed Systems/Software/Backend/Infrastructure/Computing, Systems Software Engineer, Systems Engineer/Programmer, Infrastructure/Platform Software Engineer.
+- **Infrastructure / Platform / Cloud / SRE:** Infrastructure Engineer, Platform Engineer, Cloud Engineer, Site Reliability Engineer (SRE), Production Engineer, DevOps Engineer, Data Platform Engineer.
+- **AI Systems / Agentic (secondary archetype):** AI/ML/LLM/Agentic/GenAI Engineer, Forward Deployed Engineer, AI Platform Engineer.
+- **Excluded (hard negatives):** Product Manager, Technical PM, Program/Project/Engineering Manager, any `Manager`/`Management` title, Director, VP, Head of, Chief, Staff, Principal, Solutions/Pre-sales, GTM/RevOps/Business Systems, trainer/teaching roles, intern/junior.
+
+**Location policy.** The scan reads every enabled ATS board worldwide; these lists decide what `/find-jobs` ranks and rejects (`portals.yml → find_jobs`):
+- **Preferred:** Worldwide / Global remote, or international onsite in the UK, US, Canada, Germany, Netherlands, France, Spain, Portugal, Ireland, Poland, Estonia, Lithuania, Sweden, Switzerland, UAE/Dubai, Australia, Singapore, Japan, China, Thailand.
+- **Onsite outside India** requires an explicit visa-sponsorship/relocation signal in the location or JD.
+- **Country-bound remote** (e.g. "Remote, Spain", "Remote · United States") is not worldwide remote; it needs the same sponsorship signal. "Remote — Global/Worldwide" passes directly.
+- **Blocked onsite:** India-based onsite/hybrid (India, Bengaluru/Bangalore, Hyderabad, Pune, Gurgaon/Gurugram, Noida, Mumbai, Chennai, Delhi). Remote postings that merely list an India office still pass.
+
+**Tunables** (`portals.yml → find_jobs`):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `count` | 5 | postings staged per run |
+| `since_days` | 14 | posting freshness window |
+| `shortlist_multiplier` | 3 | JD-check this many × `count`, then keep the best |
+| `jd_timeout_ms` | 15000 | per-posting ATS JD timeout |
+| `jd_concurrency` | 6 | parallel JD fetches |
+| `preferred_locations` | see above | ranking bonus + country-bound remote check |
+| `blocked_onsite_locations` | India cities | onsite roles dropped outright |
+
+**Command flags:** `node find-jobs.mjs [count] [--since N] [--keywords "a,b"] [--no-scan] [--dry-run] [--json]`.
+
 ## Workflow Execution (fast path)
 
 Do NOT run web searches and do NOT open each posting in a browser. One command does discovery, dedup, relevance ranking, and the 1–5 YOE/onsite-sponsorship check:

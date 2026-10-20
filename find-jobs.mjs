@@ -90,6 +90,7 @@ function loadConfig() {
   const find = cfg.find_jobs || {};
   return {
     titleFilter: cfg.title_filter || { positive: [] },
+    findJobs: find,
     defaults: {
       count: positiveOr(find.count, DEFAULTS.count),
       since: positiveOr(find.since_days, DEFAULTS.since),
@@ -99,6 +100,25 @@ function loadConfig() {
     },
   };
 }
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function listRegex(list, fallback) {
+  const entries = (Array.isArray(list) ? list : [])
+    .filter(item => typeof item === 'string' && item.trim())
+    .map(item => escapeRegex(item.trim()));
+  const source = entries.length ? entries.join('|') : fallback;
+  return new RegExp(`\\b(?:${source})\\b`, 'i');
+}
+
+// The location policy is user-layer config; defaults mirror the skill's
+// documented policy so a portals.yml without the block still behaves.
+let POLICY = {
+  preferred: listRegex(null, 'worldwide|global|remote'),
+  blockedOnsite: listRegex(null, 'india|bengaluru|bangalore|hyderabad|pune|gurgaon|gurugram|noida|mumbai|chennai|delhi'),
+};
 
 function positiveOr(value, fallback) {
   const n = Number(value);
@@ -169,7 +189,6 @@ function urlKey(url) {
 
 const REMOTE_RE = /\b(?:remote|worldwide|anywhere|global(?:ly)?|distributed team|work from home)\b/i;
 const WORLDWIDE_RE = /\b(?:worldwide|global(?:ly)?|anywhere|any country|fully remote)\b/i;
-const INDIA_RE = /\b(?:india|bengaluru|bangalore|hyderabad|pune|gurgaon|gurugram|noida|mumbai|chennai|delhi)\b/i;
 const SPONSOR_RE = /\b(?:visa|work permit|work authori[sz]ation|sponsor(?:ship|ed|ing)?|relocat(?:e|ion)|blue card|skilled worker|tier 2|h-?1b|employment pass|s pass|global mobility)\b/i;
 const SENIORITY_RE = /\b(?:senior|lead)\b/i;
 
@@ -193,13 +212,15 @@ function rankEntry(entry, titleFilter, extraKeywords) {
   if (worldwide) score += 50;
   else if (remote) score += 20;
   if (sponsored) score += 30;
+  if (locationKnown && POLICY.preferred.test(location)) score += 10;
   if (SENIORITY_RE.test(title)) score += 4;
   for (const kw of extraKeywords) {
     if (title.toLowerCase().includes(kw.toLowerCase())) score += 8;
   }
-  // Onsite India is out of the location policy; worldwide/remote postings that
-  // merely name an India office are not.
-  if (INDIA_RE.test(location) && !remote) score -= 1000;
+  // An onsite role in a blocked location (India by default) is out of the
+  // location policy; worldwide/remote postings that merely name an India
+  // office are not.
+  if (POLICY.blockedOnsite.test(location) && !remote) score -= 1000;
   // A KNOWN onsite location outside India with no sponsorship signal is a dead
   // end. A missing location is ambiguous, not unsponsorable — never penalize it
   // as if the provider had said "onsite".
@@ -278,10 +299,14 @@ function jdVerdict(entry, jd) {
   }
   const sponsored = SPONSOR_RE.test(haystack);
   const worldwide = WORLDWIDE_RE.test(entry.location);
+  // A known onsite role in a blocked location is out regardless of wording.
+  if (locationKnown && !remote && POLICY.blockedOnsite.test(entry.location)) {
+    return { ok: false, reason: `onsite in a blocked location (${entry.location.slice(0, 50)})` };
+  }
   // Only a KNOWN onsite location demands a sponsorship signal. Missing location
   // data stays ambiguous and passes; the apply step sees the real form.
   if (locationKnown && !remote && !sponsored) {
-    return { ok: false, reason: 'onsite outside India with no visa-sponsorship/relocation signal' };
+    return { ok: false, reason: 'onsite role with no visa-sponsorship/relocation signal' };
   }
   // "Remote · United States" / "Remote, Spain" is country-bound, not worldwide
   // remote. It only clears the location policy when the posting also advertises
@@ -307,7 +332,14 @@ function jdVerdict(entry, jd) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const { titleFilter, defaults } = loadConfig();
+  const { titleFilter, findJobs, defaults } = loadConfig();
+  POLICY = {
+    preferred: listRegex(findJobs.preferred_locations, 'worldwide|global|remote'),
+    blockedOnsite: listRegex(
+      findJobs.blocked_onsite_locations,
+      'india|bengaluru|bangalore|hyderabad|pune|gurgaon|gurugram|noida|mumbai|chennai|delhi',
+    ),
+  };
   const count = args.count || defaults.count;
   const since = args.since || defaults.since;
 
