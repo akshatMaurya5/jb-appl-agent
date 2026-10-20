@@ -1755,7 +1755,12 @@ async function submitAndVerify(page, target, profile, cv) {
       return candidates.some(isVisible);
     }).catch(() => false);
 
-    if (hasCaptcha) {
+    // A visible code input takes priority over the CAPTCHA wait: Greenhouse
+    // keeps an invisible-reCAPTCHA badge iframe on the security-code page, so
+    // waiting for it to disappear would loop forever and never enter the code
+    // the candidate was emailed.
+    const codeInputs = await detectCodeInputs(page);
+    if (hasCaptcha && !codeInputs.length) {
       if (!captchaAnnounced) {
         console.log('  🔐 CAPTCHA challenge detected (hCaptcha/reCAPTCHA). Please complete the challenge in the open browser window.');
         captchaAnnounced = true;
@@ -1763,8 +1768,6 @@ async function submitAndVerify(page, target, profile, cv) {
       await page.waitForTimeout(3000);
       continue;
     }
-
-    const codeInputs = await detectCodeInputs(page);
     if (codeInputs.length && !verificationAttempted) {
       verificationAttempted = true;
       console.log('  🔐 Verification challenge detected; running the OTP flow.');
