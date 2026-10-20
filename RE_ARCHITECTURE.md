@@ -263,6 +263,25 @@ The mapping is in place, deterministic, and LLM-gated off:
 6. Success = `confirmedSubmission` / ATS confirmation only — email arrival is
    never success.
 
+**The code step is a first-class step of the workflow (mandatory):** whenever
+the ATS shows "A verification code was sent to ‹email›. To submit your
+application, enter the 8-character code to confirm you're a human", the agent
+must read that code from the candidate's email itself and enter + verify it —
+no human paste, no skipping. Concretely, in the confirmation loop:
+
+- A **visible verification-code input takes priority over any CAPTCHA wait**.
+  Greenhouse keeps an invisible-reCAPTCHA badge iframe on the security-code
+  page, so waiting for it to disappear looped forever and never reached the
+  OTP flow (found on Affirm). Now: if a code field is present, run the OTP
+  flow immediately; the CAPTCHA wait only applies when there is no code field.
+- The code is read from Mail (`fetch-verification-code-mail.py`, which returns
+  `{"code": "…", "subject": "Security code for your application to …", "from":
+  "Greenhouse <no-reply@us.greenhouse-mail.io>"}`), then `enterVerificationCode`
+  types it into the single 8-character input, clicks the verify/submit action,
+  and the loop waits for ATS confirmation before recording `Applied`.
+- A true interactive CAPTCHA (no code field anywhere) still stops the job and
+  is never bypassed — but an emailed code is automated end-to-end.
+
 ## 9. Native-only planner dispatch
 
 `lib/planner-dispatch.mjs` — the OpenRouter tier is removed:
