@@ -19,8 +19,8 @@ The maintainers do not act as a Data Controller or Data Processor under GDPR or 
 
 This tool interfaces with AI models via third-party CLI tools. The maintainers do not control these models and cannot guarantee their behavior.
 
-- **Hallucinations:** AI models may fabricate skills, job history, qualifications, or company information. You must manually verify all generated documents before submitting them to an employer.
-- **Safety guardrails:** The default prompts instruct the AI never to auto-submit applications and to stop before the final send/apply action. However, AI compliance is not guaranteed. If you use different models, modify the system prompts, or override the safety instructions, you accept full responsibility for the AI's actions.
+- **Hallucinations:** AI models may fabricate skills, job history, qualifications, or company information. The application workflow limits answers to supported profile/CV facts and pauses on unsupported required answers, but you remain responsible for information submitted in your name.
+- **Application authorization:** A direct user request to apply authorizes the configured agent to submit that application and complete a fresh email verification code. Search and evaluation do not authorize submission. The agent pauses for unsupported required facts, CAPTCHA, and legal commitments requiring action-time confirmation. AI behavior can still be imperfect; you remain responsible for the accuracy of submitted information.
 - **Evaluation accuracy:** Job offer scores and recommendations are AI-generated opinions based on pattern matching, not professional career advice. They should inform your judgment, not replace it.
 
 ## 4. Third-Party Platforms
@@ -44,7 +44,7 @@ career-ops is designed to help individuals make better career decisions, not to 
 
 Unacceptable use includes:
 
-- Auto-submitting applications without human review
+- Submitting applications without a direct user request or within an unauthorized batch
 - Scraping platforms that prohibit automated access
 - Submitting AI-generated content without verifying its accuracy
 - Using the tool to discriminate, deceive, or misrepresent qualifications

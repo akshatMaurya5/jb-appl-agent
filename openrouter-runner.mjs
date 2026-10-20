@@ -20,6 +20,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
 import * as yaml from 'js-yaml';
@@ -68,6 +69,82 @@ const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
 const MAX_TOKENS            = 8192;
 const RATE_LIMIT_DELAY_MS   = 2500;  // pause between requests on free tier
 const MODEL_TIMEOUT_MS      = 15_000; // abort a single model call after 15 s
+const CHAT_PLAN_TIMEOUT_MS  = 180_000;
+const CHAT_PLAN_POLL_MS     = 250;
+const MAX_CHAT_PLAN_BYTES   = 1_000_000;
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+export async function requestChatAgentFormPlan(systemPrompt, userMessage, {
+  validateResponse = () => true,
+  timeoutMs = CHAT_PLAN_TIMEOUT_MS,
+  pollIntervalMs = CHAT_PLAN_POLL_MS,
+  onHandoff = message => console.log(message),
+} = {}) {
+  const requestDir = fs.mkdtempSync(path.join(tmpdir(), 'career-ops-form-plan-'));
+  fs.chmodSync(requestDir, 0o700);
+  const requestPath = path.join(requestDir, 'request.json');
+  const responsePath = path.join(requestDir, 'response.json');
+  const request = {
+    protocol: 'career-ops-chat-form-plan-v1',
+    systemPrompt,
+    userMessage,
+    responsePath,
+    responseFormat: {
+      answers: [{ key: 'text:0', answer: 'supported text', supported: true }],
+      choices: [{ key: 'native:0', option_index: 0, supported: true, confidence: 0.95 }],
+    },
+  };
+  fs.writeFileSync(requestPath, JSON.stringify(request), { mode: 0o600, flag: 'wx' });
+
+  const deadline = Date.now() + timeoutMs;
+  try {
+    onHandoff(`CAREER_OPS_CHAT_AGENT_FORM_PLAN ${JSON.stringify({
+      protocol: request.protocol,
+      requestPath,
+      responsePath,
+      instructions: 'Read requestPath, then use the current chat agent to make only truthful, profile/CV-supported ordinary answers. Write JSON in its responseFormat to responsePath. Do not answer sensitive, legal, eligibility, consent, or unsupported questions.',
+    })}`);
+    while (Date.now() < deadline) {
+      if (fs.existsSync(responsePath)) {
+        const response = fs.readFileSync(responsePath);
+        if (response.length > MAX_CHAT_PLAN_BYTES) {
+          const error = new Error('The chat-agent form plan exceeded the response size limit.');
+          error.code = 'CAREER_OPS_CHAT_PLAN_INVALID';
+          throw error;
+        }
+        const content = response.toString('utf8').trim();
+        if (!content) {
+          const error = new Error('The chat-agent form planner returned an empty response.');
+          error.code = 'CAREER_OPS_CHAT_PLAN_INVALID';
+          throw error;
+        }
+        let valid;
+        try {
+          valid = validateResponse(content);
+        } catch (cause) {
+          const error = new Error(`The chat-agent form planner returned an invalid answer plan: ${cause.message}`);
+          error.code = 'CAREER_OPS_CHAT_PLAN_INVALID';
+          throw error;
+        }
+        if (!valid) {
+          const error = new Error('The chat-agent form planner returned an invalid answer plan.');
+          error.code = 'CAREER_OPS_CHAT_PLAN_INVALID';
+          throw error;
+        }
+        return { content, model: 'chat-agent-handoff' };
+      }
+      await delay(pollIntervalMs);
+    }
+    const error = new Error(`No chat-agent form plan was provided within ${Math.ceil(timeoutMs / 1000)} seconds.`);
+    error.code = 'CAREER_OPS_CHAT_PLAN_TIMEOUT';
+    throw error;
+  } finally {
+    fs.rmSync(requestDir, { recursive: true, force: true });
+  }
+}
 
 // Provider priority order — models are sorted by provider prefix, not hardcoded names.
 // Add, remove, or reorder providers here; model names are resolved at runtime from the API.
@@ -129,11 +206,20 @@ async function loadFreeModels() {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
 
-    // A model is free when its prompt and completion pricing are both "0"
+    // Keep only free text-in/text-out chat models. Pricing alone also includes
+    // speech, image, safety and other endpoints that cannot draft form answers.
     const list = (data.data ?? [])
       .filter(m => {
         const p = m.pricing ?? {};
-        return String(p.prompt) === '0' && String(p.completion) === '0';
+        const architecture = m.architecture ?? {};
+        const input = architecture.input_modalities ?? [];
+        const output = architecture.output_modalities ?? [];
+        const modality = String(architecture.modality || '').toLowerCase();
+        const identity = `${m.id || ''} ${m.name || ''} ${m.description || ''}`.toLowerCase();
+        const unsuitable = /\b(safety|moderation|content[- ]safety|guard model|embedding|rerank|image generation|text.to.speech|speech|transcription|audio generation|video generation|lyria)\b/.test(identity);
+        return String(p.prompt) === '0' && String(p.completion) === '0' &&
+          input.includes('text') && output.includes('text') &&
+          modality.startsWith('text->') && !unsuitable;
       })
       .map(m => m.id);
 
@@ -236,7 +322,7 @@ export function buildCachedSystemMessage(systemPrompt) {
 // ---------------------------------------------------------------------------
 // OpenRouter API call — automatic model rotation with fallback
 // ---------------------------------------------------------------------------
-async function callOpenRouter(systemPrompt, userMessage, { maxAttempts = Infinity } = {}) {
+async function callOpenRouter(systemPrompt, userMessage, { maxAttempts = Infinity, validateResponse = null } = {}) {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) {
     throw new Error(
@@ -280,6 +366,7 @@ async function callOpenRouter(systemPrompt, userMessage, { maxAttempts = Infinit
       if (data.error) throw new Error(data.error.message);
       const content = data.choices?.[0]?.message?.content ?? '';
       if (!content) throw new Error('Empty response');
+      if (validateResponse && !validateResponse(content)) throw new Error('Response did not match the required output format');
       console.log('OK');
       const usage = normalizeOpenAIUsage(data.usage);
       return { content, usage };
@@ -349,6 +436,7 @@ async function callOpenRouter(systemPrompt, userMessage, { maxAttempts = Infinit
 
       const content = data.choices?.[0]?.message?.content ?? '';
       if (!content) throw new Error('Empty response');
+      if (validateResponse && !validateResponse(content)) throw new Error('Response did not match the required output format');
 
       const usage = normalizeOpenAIUsage(data.usage);
 

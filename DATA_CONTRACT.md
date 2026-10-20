@@ -11,6 +11,7 @@ These files contain your personal data, customizations, and work product. Update
 | `.career-ops-web/chats/*.json` | Local assistant conversation history (gitignored, not verified profile facts); only the chat API writes these files |
 | `.career-ops-web/cv-studio/*.json` | Your CV Studio edits to a tailored CV, one file per report number (gitignored); only the CV Studio API writes these files |
 | `cv.md` | Your CV in markdown |
+| `FAQS.md` | Private application-form question/answer history used for exact-match reuse; may contain personal application responses and is never treated as a higher-trust source than your profile/CV |
 | `config/profile.yml` | Your identity, targets, comp range |
 | `config/cv-facts.json` | Your CV fact-check allowlist and forbidden phrases |
 | `config/benchmarks.yml` | Your market calibration benchmark overrides (optional; copy `templates/benchmarks.yml` here and edit — read by `funnel-velocity.mjs`) |

@@ -8,7 +8,7 @@ Career-ops is built on three commitments that every design decision serves:
 
 - **Local-first.** Everything runs on your machine against your files. No account required, no server in the loop for the core tool.
 - **AI-agnostic.** The logic lives in Markdown prompt files under `modes/`, executed by whatever AI coding CLI you use (Claude Code, Codex, OpenCode, Gemini, Qwen, Grok, Antigravity) or by standalone Node scripts. No single model is hardcoded.
-- **Human-in-the-loop.** The tool prepares and evaluates; the human reviews and clicks. It never submits applications on your behalf.
+- **User-authorized autonomy.** A direct request to apply authorizes the agent to complete submission and fresh OTP verification. Job discovery or evaluation alone does not authorize an application. Unsupported required facts, CAPTCHA/Turnstile, and commitments requiring action-time confirmation remain handoffs.
 
 ## The two layers (the data contract)
 
@@ -84,7 +84,7 @@ scan ──► data/pipeline.md ──► evaluate (oferta + cv) ──► repor
                                           │                      │
                                           └──► data/applications.md (tracker)
                                                          │
-                                          apply (human reviews + clicks)
+                                          apply (authorized end to end)
 ```
 
 ## Quality gates

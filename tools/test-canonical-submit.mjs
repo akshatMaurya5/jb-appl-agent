@@ -32,7 +32,7 @@ async function testSubmit() {
   await page.locator('input#phone').fill('+91-7889021799');
 
   // Resume
-  const pdfPath = '/Users/akshatmaurya/Desktop/CVS STUFF/Akshat Maurya-Resume.pdf';
+  const pdfPath = '/Users/akshatmaurya/Desktop/AKSHAT-MAURYA-RESUME.pdf';
   if (existsSync(pdfPath)) {
     console.log('5. Attaching master resume...');
     await page.locator('input#resume').setInputFiles(pdfPath);
