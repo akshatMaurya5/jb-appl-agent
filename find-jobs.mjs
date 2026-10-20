@@ -312,7 +312,7 @@ function jdVerdict(entry, jd) {
   // remote. It only clears the location policy when the posting also advertises
   // sponsorship/relocation.
   if (locationKnown && remote && !worldwide && !sponsored
-      && /\b(?:united states|usa|u\.s\.|canada|united kingdom|uk|germany|france|spain|portugal|netherlands|poland|ireland|korea|japan|singapore|australia|brazil|europe|emea)\b/i.test(entry.location)) {
+      && /\b(?:united states|usa|u\.s\.|canada|united kingdom|uk|germany|france|spain|portugal|netherlands|amsterdam|poland|ireland|korea|japan|singapore|australia|brazil|europe|emea)\b/i.test(entry.location)) {
     return { ok: false, reason: 'remote restricted to a specific country with no sponsorship signal' };
   }
   if (remote && jd) {

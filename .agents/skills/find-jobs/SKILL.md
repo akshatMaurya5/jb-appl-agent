@@ -59,7 +59,7 @@ This skill finds new, active software engineering opportunities outside India ta
 - **Excluded (hard negatives):** Product Manager, Technical PM, Program/Project/Engineering Manager, any `Manager`/`Management` title, Director, VP, Head of, Chief, Staff, Principal, Solutions/Pre-sales, GTM/RevOps/Business Systems, trainer/teaching roles, intern/junior.
 
 **Location policy.** The scan reads every enabled ATS board worldwide; these lists decide what `/find-jobs` ranks and rejects (`portals.yml → find_jobs`):
-- **Preferred:** Worldwide / Global remote, or international onsite in the UK, US, Canada, Germany, Netherlands, France, Spain, Portugal, Ireland, Poland, Estonia, Lithuania, Sweden, Switzerland, UAE/Dubai, Australia, Singapore, Japan, China, Thailand.
+- **Preferred:** Worldwide / Global remote, or international onsite in the UK, US, Canada, Germany, Netherlands/Amsterdam, France, Spain, Portugal, Ireland, Poland, Estonia, Lithuania, Sweden, Switzerland, UAE/Dubai, Australia, Singapore, Japan, China, Thailand.
 - **Onsite outside India** requires an explicit visa-sponsorship/relocation signal in the location or JD.
 - **Country-bound remote** (e.g. "Remote, Spain", "Remote · United States") is not worldwide remote; it needs the same sponsorship signal. "Remote — Global/Worldwide" passes directly.
 - **Blocked onsite:** India-based onsite/hybrid (India, Bengaluru/Bangalore, Hyderabad, Pune, Gurgaon/Gurugram, Noida, Mumbai, Chennai, Delhi). Remote postings that merely list an India office still pass.
