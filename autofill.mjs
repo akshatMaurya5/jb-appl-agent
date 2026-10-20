@@ -15,11 +15,19 @@ import { mergeTracker } from './merge-tracker.mjs';
 import { parseTrackerRow, resolveColumns } from './tracker-parse.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { normalizeUrl } from './url-key.mjs';
-import { callOpenRouter, loadEnvFile, requestChatAgentFormPlan } from './openrouter-runner.mjs';
+import { callOpenRouter } from './openrouter-runner.mjs';
+import { loadEnvFile, requestChatAgentFormPlan } from './lib/chat-agent-form-plan.mjs';
 import { callActiveAgentFormPlanner } from './lib/active-agent-form-planner.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
 import { findFaqAnswer, readReusableFaq, recordApplicationFaq } from './lib/application-faq.mjs';
+import { answerQuestion, explicitApplicationAnswer } from './lib/form-answer-engine.mjs';
 import { isPlaceholderChoice, isRegisteredLocationSelection, selectedValueMatches, uniqueLocationSuggestion, uniqueOptionMatch } from './lib/autofill-form-utils.mjs';
+import {
+  normalize, isUnsafeChoiceContext, requiresExplicitDecision,
+  approvedLegalAcknowledgementOptions, locationOptionMatches, privacyAcknowledgementOptions,
+  matchOptions, noticePeriodOptionMatches, relocationOptionMatches, experienceOptionContains,
+  optionPolarity, similarityMatchOptions,
+} from './lib/option-matching.mjs';
 import { enterVerificationCode } from './lib/otp-entry.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -59,6 +67,7 @@ function loadCandidateProfile() {
       ? config.application_authorizations.legal_acknowledgements : [],
     explicitFormAnswers: Array.isArray(config.application_answers) ? config.application_answers : [],
     authorizeRequiredSubmissionTerms: config.application_authorizations?.required_submission_terms?.all_companies === true,
+    raw: config,
   };
 }
 
@@ -67,19 +76,8 @@ function cvText() {
   return existsSync(p) ? readFileSync(p, 'utf8') : '';
 }
 
-function normalize(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
-function explicitApplicationAnswer(context, target, profile) {
-  const company = normalize(target?.company || target?.name || '');
-  const field = normalize(context);
-  const matches = (profile?.explicitFormAnswers || []).filter(item =>
-    normalize(item?.company) === company && normalize(item?.field_label) &&
-    field.includes(normalize(item.field_label)) && typeof item.answer === 'string'
-  );
-  return matches.length === 1 ? matches[0].answer : '';
-}
 function escapeCssAttribute(value) { return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"'); }
 function urlKey(s) { return normalizeUrl(String(s || '')) || normalize(s); }
-function urlValue(s) { return s ? (/^https?:\/\//i.test(s) ? s : `https://${s}`) : ''; }
 
 async function callFormPlanner(systemPrompt, userMessage, options = {}) {
   const validate = response => !options.validateResponse || options.validateResponse(response.content);
@@ -111,293 +109,13 @@ async function callFormPlanner(systemPrompt, userMessage, options = {}) {
 }
 let activeAgentDisabled = false;
 
-function extractLocationChoices(context) {
-  const raw = String(context || '');
-  const match = raw.match(/\b(?:based|located|reside|residing|resident|live|living)\s+in\s+(.+?)(?=\?|[.;]|,|\b(?:and\s+(?:are|would|can|will|able|willing)|(?:are|would|can|will)\s+you)\b|$)/i);
-  if (!match) return [];
-  return match[1].split(/\s+(?:or|and)\s+|[,/|]/i)
-    .map(place => normalize(place.replace(/\b(?:currently|the|a|an|area|metro|greater)\b/gi, ' ')))
-    .filter(Boolean);
-}
-
-function yesNoExplanation(answer, detail, context) {
-  if (!/\b(?:yes\s*\/\s*no|yes or no|explain|explanation|briefly explain|in 1|one sentence|2 sentences)\b/i.test(context)) return answer;
-  return `${answer}. ${detail}`;
-}
-
-function countryHint(text) {
-  const t = normalize(text);
-  const known = [
-    ['India', /\bindia\b/], ['United States', /\b(united states|usa|us)\b/],
-    ['United Kingdom', /\b(united kingdom|uk|britain|england|scotland|wales)\b/],
-    ['Germany', /\bgermany\b/], ['France', /\bfrance\b/], ['Netherlands', /\b(netherlands|holland)\b/],
-    ['Australia', /\baustralia\b/], ['United Arab Emirates', /\b(uae|united arab emirates)\b/],
-    ['Switzerland', /\bswitzerland\b/], ['Spain', /\bspain\b/], ['Ireland', /\bireland\b/],
-    ['Hong Kong', /\bhong kong\b/], ['Singapore', /\bsingapore\b/], ['China', /\bchina\b/],
-    ['Japan', /\bjapan\b/], ['Thailand', /\bthailand\b/], ['New Zealand', /\bnew zealand\b/],
-    ['Sweden', /\bsweden\b/], ['Norway', /\bnorway\b/], ['Denmark', /\bdenmark\b/],
-    ['Belgium', /\bbelgium\b/], ['Austria', /\baustria\b/], ['Italy', /\bitaly\b/],
-    ['Portugal', /\bportugal\b/], ['Poland', /\bpoland\b/], ['Finland', /\bfinland\b/],
-    ['Canada', /\bcanada\b/], ['Brazil', /\bbrazil\b/], ['Mexico', /\bmexico\b/],
-    ['South Korea', /\b(south korea|republic of korea)\b/], ['Taiwan', /\btaiwan\b/],
-    ['Malaysia', /\bmalaysia\b/], ['Indonesia', /\bindonesia\b/], ['Vietnam', /\bvietnam\b/],
-    ['Saudi Arabia', /\bsaudi arabia\b/], ['Qatar', /\bqatar\b/], ['Israel', /\bisrael\b/],
-    ['Greece', /\bgreece\b/], ['Czechia', /\b(czechia|czech republic)\b/], ['Luxembourg', /\bluxembourg\b/],
-    ['Iceland', /\biceland\b/], ['Estonia', /\bestonia\b/], ['Latvia', /\blatvia\b/], ['Lithuania', /\blithuania\b/],
-  ];
-  return known.find(([, pattern]) => pattern.test(t))?.[0] || '';
-}
-
-function worldwideRemote(target) {
-  const place = normalize(target?.location || '');
-  return place.includes('remote') && /worldwide|global|anywhere|all countries/.test(place);
-}
-
+// Facade over lib/form-answer-engine.mjs: explicit per-company answers →
+// category-deterministic profile facts → FAQ similarity. The native
+// sub-agent tier lives in planVisibleForm, not here.
 function answerFor(context, profile, cv, target = {}) {
-  const explicitAnswer = explicitApplicationAnswer(context, target, profile);
-  if (explicitAnswer) return explicitAnswer;
-  const t = normalize(context);
-  const has = (...terms) => terms.some(term => t.includes(term));
-  if (/\b(?:are you|do you|would you|can you)\b/.test(t) && /\b(?:currently )?(?:based|located|reside|residing|resident of|resident|live|living) in\b/.test(t)) {
-    if (/\b(?:or\s+(?:would\s+you\s+be\s+)?willing|open|able)\b/i.test(context) && /\brelocat/i.test(context)) {
-      const preference = normalize(profile.relocationPreference);
-      if (/\b(?:open to|willing to|able to|relocation)\b/.test(preference)) return 'Yes';
-    }
-    const places = extractLocationChoices(context);
-    if (places.length) {
-      const candidateLocations = [profile.city, profile.state, profile.country].map(normalize).filter(Boolean);
-      return places.some(place => candidateLocations.includes(place)) ? 'Yes' : 'No';
-    }
-  }
-  if (/\b(?:willing|open|able)\b/.test(t) && /\brelocat(?:e|ing|ion)\b/.test(t)) {
-    const preference = normalize(profile.relocationPreference);
-    if (/\b(?:not open|unable|cannot|can t|do not|don t|no relocation)\b/.test(preference)) return 'No';
-    if (/\b(?:open to|willing to|able to|relocation)\b/.test(preference) && /\brelocat/.test(preference)) return 'Yes';
-  }
-  const minimumYears = String(context).match(/\b(?:at least|minimum of|minimum)\s+(\d+(?:\.\d+)?)\s*(?:\+\s*)?years?\b/i);
-  const generalExperienceThreshold = /\byears?\s+(?:of\s+)?(?:professional\s+|work\s+)?experience\s+(?:as\b|in\s+(?:backend|software|engineering)\b)|\byears?\s+of\s+(?:professional\s+)?work experience\b|\byears?\s+of\s+(?:professional\s+)?(?:backend|software|engineering)(?: engineering)? experience\b/i.test(context);
-  if (minimumYears && generalExperienceThreshold) {
-    const years = Number(profile.yoe);
-    if (Number.isFinite(years)) {
-      const answer = years >= Number(minimumYears[1]) ? 'Yes' : 'No';
-      return yesNoExplanation(answer, `I have ${profile.yoe} years of professional experience as listed in my profile.`, context);
-    }
-  }
-  if (/\b(?:over|at least|older than|age of)\s*(?:the age of )?18\b|\b18 (?:years of age )?(?:or older|or above)\b|\b(?:are you|at least)\s+18\b/i.test(context)) {
-    return 'Yes';
-  }
-  if (has('legally authorized to work in this location', 'authorized to work in this location')) return 'Yes, and I will not require sponsorship now or in the future';
-  if (has('location do you intend to work from', 'intend to work from')) return 'India';
-  if (has('interview recording consent', 'consent to be recorded')) return 'Yes, I consent to be recorded';
-  if (has('authorized to work in the country', 'authorized to work in the country you currently reside', 'authorized to work in the country where you reside')) return 'Yes';
-  if (has('sponsorship') && has('country you currently reside', 'country where you reside', 'country of residence')) return 'No';
-  if (has('passport country', 'citizenship country', 'nationality', 'citizenship')) return profile.country;
-  if (has('country of residence', 'current country', 'residence country')) return profile.country;
-  if (has('first and last name', 'full name', 'legal name')) return profile.fullName;
-  if (has('first name', 'given name')) return profile.firstName;
-  if (has('last name', 'family name', 'surname')) return profile.lastName;
-  if (has('preferred name')) return profile.firstName;
-  if (/\bname\b/.test(t) && !/\b(?:company|manager|reference|emergency|supervisor|contact|user|file|project) name\b|name pronunciation/.test(t)) return profile.fullName;
-  if (has('email')) return profile.email;
-  if (has('phone', 'mobile', 'telephone')) return profile.phone;
-  if (has('linkedin')) return urlValue(profile.linkedin);
-  if (has('github')) return urlValue(profile.github);
-  if (has('portfolio', 'website')) return urlValue(profile.portfolioUrl);
-  if (has('current company', 'current employer', 'currently employed', 'last employed') ||
-      /where are you currently employed|where were you last employed|which company.{0,40}\b(?:work|employ)/.test(t)) {
-    if (profile.currentCompany) return profile.currentCompany;
-    const roles = [...String(cv || '').matchAll(/^###\s+([^\n]+)\n([\s\S]*?)(?=^###\s+|^##\s+|$)/gm)];
-    const currentRole = roles.find(([, , details]) => /\bPresent\b/i.test(details));
-    return currentRole?.[1]?.split(/\s+[-–—]\s+/)[0]?.trim() || '';
-  }
-  if (has('current job title', 'current title', 'job title', 'current role', 'present role', 'present title')) {
-    return profile.title || 'Software Engineer';
-  }
-  if (/\b(?:are you familiar with|do you have experience (?:working )?with)\b/i.test(context) && /\b(?:java|kotlin|go|golang|spring|kafka|aws|gcp|cloud)\b/i.test(context)) {
-    return 'Yes';
-  }
-  if (has('city')) return profile.city;
-  if (has('state', 'province', 'region')) return profile.state;
-  if (has('country') && !has('authorized', 'sponsorship', 'permit', 'visa', 'live in', 'located in', 'travel')) return profile.country;
-  if (has('postal code', 'postcode', 'zip code', 'zip', 'pin code', 'pincode')) return profile.postalCode;
-  if (has('location') && !has('authorized', 'sponsorship', 'permit', 'visa', 'live in', 'located in', 'travel', 'intend to work', 'work in this location')) return [profile.city, profile.state, profile.country].filter(Boolean).join(', ');
-  if (has('address')) return profile.address;
-  if (has('ideal start date', 'earliest start date')) {
-    const noticeDays = String(profile.noticePeriod || '').match(/\d+/)?.[0];
-    if (noticeDays) {
-      const date = new Date(`${localToday()}T12:00:00`);
-      date.setDate(date.getDate() + Number(noticeDays));
-      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-    }
-    return '';
-  }
-  if (has('notice period', 'availability', 'start date')) return profile.noticePeriod;
-  // Regional permit questions are legal/sensitive, so never delegate the
-  // decision to an LLM. Map them from the candidate's saved citizenship and
-  // work authorization, then select only a matching option actually on-page.
-  if (has('work pass', 'work permit', 'employment pass', 'work visa') &&
-      (has('require', 'need', 'citizen', 'permanent resident', 'eligible to work') || countryHint(context))) {
-    const country = countryHint(context) || countryHint(target.location);
-    if (country && normalize(country) === normalize(profile.country)) return 'I do not require a work pass';
-    if (profile.country === 'India' && country && !profile.authorizedIn.some(item => normalize(item) === normalize(country))) {
-      return 'I require a work pass';
-    }
-  }
-  if (/\b(?:how many )?years? (?:of )?(?:professional )?(?:backend |software |engineering )?experience\b|\byears? experience\b|\byoe\b/i.test(context)) {
-    if (/\byears? (?:of )?(?:professional )?(?:experience )?(?:with|in|using)\b|\b(?:go|golang|rust|python|java|aws|gcp|azure|kubernetes|docker|postgresql|sql|kafka) experience\b/i.test(context)) return '';
-    return profile.yoe;
-  }
-  if (has('salary', 'compensation', 'salary expectation', 'desired pay')) return profile.jobSalary || profile.salaryDefault || profile.salaryText;
-  if (has('referral source', 'how did you hear', 'where did you first hear', 'where did you hear')) return profile.referralSource || 'Company Career Page';
-  if (has('open source', 'open-source', 'projects you own')) return profile.github || 'https://github.com/akshatMaurya5';
-  if (has('primary programming language', 'primary language', 'programming language and')) return 'Go, Java, Distributed Systems, Spring Boot';
-  if (has('main location of your work contract', 'location of your work contract')) {
-    return 'I want to be based in Germany but will need visa support';
-  }
-  if (has('knowledge/experience do you have with n8n', 'experience do you have with n8n')) {
-    return "I've used other automation tools in current or previous roles";
-  }
-  if (has('how long have you been working remotely')) {
-    return '2 to 4 years';
-  }
-  if (has('experience in startups/scale-ups', 'experience in startups')) {
-    return 'Less than 2 years';
-  }
-  if (has('experience with ai-assisted or autonomous software-development workflows', 'ai-assisted or autonomous software development')) {
-    return 'I have helped build or operate an AI-assisted development workflow used by an engineering team.';
-  }
-  if (has('hands-on experience with autonomous coding agents', 'hands on experience with autonomous coding agents')) {
-    return 'Built or operated agent workflows used by other developers.';
-  }
-  if (has('platform engineering, developer experience, infrastructure, ci/cd')) {
-    return '2–4 years';
-  }
-  if (has('personally designed or implemented')) {
-    return 'Human approval or review gates for automated systems';
-  }
-  if (has('measurement/evaluation work you have done', 'measurement evaluation work', 'measurement/evaluation work')) {
-    return 'Defined engineering quality or productivity metrics.';
-  }
-  if (has('location do you intend to work from', 'intend to work from')) return 'India';
-  if (has('legally authorized to work in this location')) return 'Yes, and I will not require sponsorship now or in the future';
-  if (has('interview recording consent', 'consent to be recorded')) return 'Yes, I consent to be recorded';
-  if (has('what made you decide to apply', 'decide to apply')) {
-    return "I have been following Temporal's open-source workflow orchestration engine closely. Given my background building fault-tolerant distributed systems, state machines, and high-concurrency event pipelines in Go at Visa, contributing directly to the core Open Source Server engine is an ideal technical match.";
-  }
-  if (has('why railway')) {
-    return "I want to work at Railway because I love building developer-facing infrastructure that makes engineers significantly higher leverage. At Visa, I worked on core distributed systems, low-latency bytecode profiling, and off-heap storage migrations; at Storefox AI, I built Go-based event-driven notification microservices. The Infrastructure Engineer role at Railway directly aligns with my passion for building system-level Golang and gRPC services from scratch, working closely with OS and container primitives, and solving distributed systems problems with simplicity and high reliability.";
-  }
-  if (has('choose one to share with us', 'resumes only tell part of the story')) {
-    return "At Visa, I spearheaded the design of an automated self-healing framework for our microservices pipeline, handling critical financial telemetry and reducing MTTR by 70%. Working extensively with Go, distributed locks, and idempotency guarantees, I learned how subtle race conditions in task queues can degrade system throughput. I am passionate about core backend engineering where reliability and concurrency primitives must be rock-solid under high load.";
-  }
-  if (has('sponsorship to work in the united states', 'require sponsorship to work in the united states', 'require sponsorship to work in the us')) return 'Yes';
-  if (has('san francisco office at least 3 days a week', 'work out of our san francisco office')) return 'Yes';
-  if (has('other relevant urls', 'other relevant url')) return profile.github || 'https://github.com/akshatMaurya5';
-  if (has('which excites you most about working at llamaindex', 'excites you most about working at llamaindex')) {
-    return "I am excited about LlamaIndex's mission of transforming document understanding and building the backend infrastructure that powers LLM-native applications. In my work at Visa, I designed distributed backend architectures, high-throughput data processing pipelines, and agentic workflows with automated observability. The opportunity to scale core APIs, build resilient ingestion systems, and work with technologies like Python, Postgres, and Temporal to enable developers worldwide to build reliable AI agents is directly aligned with my passion for distributed systems and AI platforms.";
-  }
-  if (has('willing to work in our san francisco office', 'in-person role. are you willing to work in our san francisco office')) return 'Yes';
-  if (has('require visa sponsorship? if yes, select the type of sponsorship', 'select the type of sponsorship')) return 'Yes, H1B Sponsorship';
-  if (has('share your portfolio')) return profile.github || 'https://github.com/akshatmaurya';
-  if (has('hybrid work model with 3 days a week in office', 'join us in the office on mondays')) return 'Yes';
-  if (has('require work authorization support to work in the country where this job is posted')) return 'Yes';
-  if (has('experience designing, building, or operating distributed or real-time streaming systems')) {
-    return "At Visa, I engineered critical components of our distributed streaming infrastructure processing over 200M+ transactions daily. I designed and deployed an Apache Kafka-driven offline retry and cross-datacenter event replication system that sustained 99.9% delivery reliability through network degradations and outages. Additionally, I built an end-to-end forensic API audit platform streaming field-level encrypted payloads at 200+ TPS via Kafka to AWS S3 with byte-offset indexing in OpenSearch, backed by a circuit-breaker memory buffer preventing audit data loss during Kafka broker downtime. I also migrated JVM profiler metric streams to OpenHFT Chronicle Queue, achieving ~1M events/sec write throughput.";
-  }
-  if (has('iran', 'cuba', 'north korea', 'syria')) return 'No';
-  if (has('currently based in any of these countries', 'based in any of these countries', 'countries where we are accepting applications')) return profile.country;
-  if (has('following states', 'live in one of the following states')) return 'No';
-  if (has('in which country', 'country did you obtain', 'country of citizenship')) return profile.country;
-  if (has('i certify that', 'true and correct', 'best of my knowledge', 'understand my application will be processed in accordance')) return 'Yes';
-  if (has('additional citizenship', 'additional nationality', 'dual citizenship')) return 'No';
-  if (has('previously worked', 'consulted for', 'applied to any positions in the past', 'applied to any positions')) return 'No';
-  if (has('hybrid schedule', 'willing to commit', 'office days', 'overlapping working hours', 'overlap with the est', 'comfortable working a schedule', 'provides this overlap')) return 'Yes';
-  if (has('country you currently reside in', 'country where you reside') && has('sponsorship')) return 'No';
-  if (has('authorized to work in the country you currently reside in', 'authorized to work in the country where you reside')) return 'Yes';
-  if (has('country where you live', 'authorization to work in the country where you live')) return 'I am authorized to work in the country due to my nationality';
-  if (has('pronoun')) return profile.pronouns;
-  if (has('pronunciation')) return profile.pronunciation;
-  if (has('university', 'college', 'school name')) return 'Dr. B.R. Ambedkar National Institute of Technology, Jalandhar';
-  if (has('degree')) return 'Bachelor of Technology';
-  if (has('major', 'discipline', 'field of study')) return 'Electronics and Communication Engineering';
-  if (has('eu citizen', 'citizen of european union', 'citizen of the eu', 'citizen of an eu', 'eu member state')) return 'No';
-  if (has('nationality', 'citizenship')) return profile.country === 'India' ? 'Indian' : '';
-  if (has('without employer sponsorship', 'without sponsorship', 'without visa sponsorship')) return 'No';
-  if (has('remain in your current location', 'remain in current location')) {
-    const currentCountry = normalize(profile.country);
-    const authorized = profile.authorizedIn.some(item => normalize(item) === currentCountry);
-    if (authorized) return 'No';
-    return profile.sponsorshipRequired ? 'Yes' : '';
-  }
-  if (has('visa sponsorship') || (t.includes('sponsorship') && (t.includes('require') || t.includes('need'))) || t.includes('require sponsorship')) {
-    const country = countryHint(context) || countryHint(target.location);
-    const answer = country === 'India' ? 'No' : profile.sponsorshipRequired ? 'Yes' : 'No';
-    const place = country || 'the job location';
-    const detail = answer === 'Yes' ? `I would require visa sponsorship to work in ${place}.` : `I would not require visa sponsorship to work in ${place}.`;
-    return yesNoExplanation(answer, detail, context);
-  }
-  if (has('eligible to work', 'country you have applied to', 'country where this job is based', 'country of this job')) {
-    const country = countryHint(context) || countryHint(target.location);
-    if (country && normalize(country) === normalize(profile.country)) return 'Yes';
-    return profile.sponsorshipRequired ? 'No' : 'Yes';
-  }
-  if (has('authorized to work', 'authorised to work', 'legally authorized', 'legally authorised', 'right to work', 'work authorization', 'work authorisation')) {
-    const country = countryHint(context) || countryHint(target.location);
-    if (country) {
-      const answer = profile.authorizedIn.some(item => normalize(item) === normalize(country)) ? 'Yes' : 'No';
-      const detail = answer === 'Yes' ? `I am authorized to work in ${country}.` : `I am currently authorized to work in ${profile.authorizedIn.join(', ')}, not ${country}.`;
-      return yesNoExplanation(answer, detail, context);
-    }
-    return profile.sponsorshipRequired ? 'No' : 'Yes';
-  }
-  if (/cities are you available to work|available to work in what cities|preferred work location/i.test(context)) {
-    const targetCity = target.location?.split(/[,(]/)[0]?.trim();
-    if (targetCity) return targetCity;
-    return profile.city;
-  }
-  if (has('previously employed')) return profile.previouslyEmployed;
-  if ((has('non compete', 'noncompete') && !has('employment agreements', 'post employment restrictions', 'restrictive covenants')) ||
-      (/agreement/.test(t) && has('non compete'))) return profile.nonCompete;
-  // US EEO forms often split Hispanic/Latino origin from race. Answer from an
-  // explicit profile value first; otherwise Asian/Indian profile facts support
-  // No. Leave ambiguous or mixed backgrounds unanswered instead of guessing.
-  if (has('hispanic', 'latino')) {
-    const explicit = normalize(profile.hispanicLatino);
-    if (explicit) return /^(yes|true|hispanic|latino|latina|latine)$/.test(explicit) ? 'Yes' :
-      /^(no|false|not hispanic|not latino|not latina|not latine)$/.test(explicit) ? 'No' : '';
-    const background = normalize(`${profile.ethnicity} ${profile.race}`);
-    if (/\b(hispanic|latino|latina|latine)\b/.test(background)) return 'Yes';
-    if (/\b(asian|indian|south asian|east asian|southeast asian)\b/.test(background) &&
-        !/\b(hispanic|latino|latina|latine)\b/.test(background)) return 'No';
-    return '';
-  }
-  if (has('transgender')) return profile.transgender;
-  if (has('gender identity')) return profile.gender;
-  if (has('gender', 'sex')) return profile.genderIdentity || profile.gender;
-  if (has('disability', 'disabled')) return profile.disability;
-  if (has('neurodivergent')) return profile.neurodivergent;
-  if (has('ethnicity', 'race')) return profile.race || profile.ethnicity;
-  if (has('sexual orientation')) return profile.sexualOrientation;
-  if (has('veteran')) return profile.veteranStatus;
-  if (has('occupation of your main household earner', 'household earner when you were aged', 'household earner')) return "I don't wish to answer";
-  if (!cv) return '';
-  if (has('why us', 'why this company', 'why do you want', 'what interests you', 'motivation', 'cover letter', 'what excites you', 'excites you about')) {
-    if (target?.company && normalize(target.company).includes('trade republic')) {
-      return 'Trade Republic\'s mission to democratize wealth creation across Europe at massive scale aligns directly with my engineering focus. Having built high-throughput, low-latency financial systems in the JVM ecosystem using Kafka, Spring Boot, and cloud architecture, I am excited to contribute to Trade Republic\'s core backend platform, scaling reliable microservices that handle critical financial transactions for millions of users.';
-    }
-    return 'I am interested in applying my backend and distributed-systems experience to a team working on reliable, high-scale infrastructure. At Visa, I worked on transaction notification and observability systems; at Storefox AI, I built Go-based event-driven notification services. I would welcome the opportunity to bring that experience to this role.';
-  }
-  if (has('proudest project', 'interesting project', 'project you are proud', 'technical challenge', 'accomplishment', 'proudest product', 'built from scratch and why you are proud')) {
-    return 'At Visa, I built a JVM profiler using ByteBuddy and reworked its storage around OpenHFT Chronicle Queue. The migration increased write throughput from about 100K to about 1M events per second and reduced storage footprint by about 50%, while the profiler captured method-level execution data for diagnosis.';
-  }
-  if (has('go experience', 'golang experience', 'experience with go')) {
-    return 'At Storefox AI, I designed and deployed a high-concurrency event-driven notification service using Go, Kafka, and Firebase Cloud Messaging, delivering targeted alerts to more than 50,000 active users with sub-second latency.';
-  }
-  if (has('tell us about yourself', 'tell me about yourself', 'professional summary', 'describe your background')) {
-    return 'I am a backend and software engineer with experience in distributed systems, event-driven services, and observability. At Visa, I worked on transaction notification infrastructure and low-latency profiling; at Storefox AI, I built Go notification services. I also hold a B.Tech in Electronics and Communication Engineering from NIT Jalandhar.';
-  }
-  return findFaqAnswer(DATA_ROOT, context);
+  return answerQuestion(context, profile, cv, target, { faqRoot: DATA_ROOT });
 }
+
 
 async function contextFor(locator) {
   return locator.evaluate(el => {
@@ -1224,270 +942,6 @@ async function activeReactOptions(page, combo) {
   return page.locator('[data-autofill-no-associated-options]');
 }
 
-function isUnsafeChoiceContext(context) {
-  return /salary|compensation|pay|visa|sponsorship|work authorization|authorized|right to work|citizenship|nationality|country|location|address|phone|email|date of birth|gender|race|ethnicity|hispanic|latino|disability|neurodivergent|veteran|sexual orientation|religion|pronoun|consent|agree|attest|privacy|data transfer|data protection|personal data|gdpr|arbitration|own words|use of ai|generated content|academic performance|high school|degree result|willing|able to|travel|relocat|background check|criminal|notice period|start date|years of experience|company count/i.test(context);
-}
-
-function requiresExplicitDecision(context) {
-  return /consent|\bagree\b|\battest\w*|\bcertif\w*|arbitration|waiver|release of claims|background check|criminal|credit check|drug test|terms and conditions|employment agreement|legal agreement|data transfer|data processing|gdpr|truthful|accurate|information.*true/i.test(context);
-}
-
-// Legal dropdowns are never inferred. A choice is eligible only when the
-// candidate has explicitly approved this exact company, field, and option in
-// config/profile.yml. This intentionally does not use fuzzy matching.
-function approvedLegalAcknowledgementOptions(options, context, target, profile) {
-  const company = normalize(target?.company || target?.name || '');
-  const field = normalize(context);
-  if (!company || !field) return [];
-  const approved = (profile?.approvedLegalAcknowledgements || []).filter(item => {
-    const approvedCompany = normalize(item?.company);
-    const approvedField = normalize(item?.field_label);
-    return approvedCompany === company && approvedField && field.includes(approvedField);
-  });
-  const allowedTexts = new Set(approved.map(item => normalize(item.approved_option)).filter(Boolean));
-  if (!allowedTexts.size) return [];
-  const matches = options.filter(option => allowedTexts.has(normalize(option.text)));
-  return matches.length === 1 ? matches : [];
-}
-
-function locationOptionMatches(options, city) {
-  const wanted = normalize(city);
-  if (!wanted) return [];
-  const matches = options.filter(option => {
-    const text = normalize(option.text);
-    return text === wanted || text.startsWith(`${wanted} `);
-  });
-  const exact = matches.filter(option => normalize(option.text) === wanted);
-  return exact.length ? exact : matches;
-}
-
-function privacyAcknowledgementOptions(options, context) {
-  const label = String(context || '');
-  if (!/(candidate.{0,40}privacy|privacy\s+(?:notice|policy|statement)|data protection (?:notice|policy|statement)|candidate-privacy-notice|gdpr)/i.test(label)) return [];
-  if (/\b(opt[ -]?in|marketing|arbitration|non-compete|criminal|background check)\b/i.test(label)) return [];
-  const acknowledgements = options.filter(option => {
-    const text = String(option.text || '').trim();
-    return /^(?:i\s+)?(?:acknowledge|confirm|agree)(?:\s*\/\s*(?:confirm|acknowledge))?\.?$/i.test(text) ||
-      /^i\s+(?:have\s+read(?:\s+and\s+understood)?|understand)\b.*\b(?:privacy\s+(?:notice|policy|statement)|data protection notice|gdpr)\b/i.test(text) ||
-      /^(?:acknowledge|confirm|i agree\.?)$/i.test(text);
-  });
-  return acknowledgements.length === 1 ? acknowledgements : [];
-}
-
-function matchOptions(options, value, context = '') {
-  const rawWanted = normalize(value);
-  const rawExact = options.filter(option => normalize(option.text) === rawWanted || normalize(option.value) === rawWanted);
-  if (rawExact.length) return rawExact;
-  const wanted = rawWanted.match(/^(yes|no)\b/)?.[1] || rawWanted;
-  const question = normalize(context);
-  const noticeMatches = noticePeriodOptionMatches(options, value, context);
-  if (noticeMatches.length === 1) return noticeMatches;
-  if (/\b(?:do|will|would) you\b.{0,70}\b(?:require|need)\s+(?:a\s+)?(?:work pass|work permit|employment pass|work visa)\b/i.test(context) &&
-      /require|need/.test(rawWanted)) {
-    const yesOptions = options.filter(option => optionPolarity(option.text) === 'yes');
-    if (yesOptions.length === 1) return yesOptions;
-  }
-  if (/work pass|work permit|employment pass|work visa/.test(question) &&
-      /require|need/.test(rawWanted)) {
-    const workAuthorizationOptions = options.filter(option => {
-      const text = normalize(option.text);
-      return /\b(?:require|need|sponsor|sponsorship)\b/.test(text) &&
-        /\b(?:work pass|work permit|employment pass|work visa|visa sponsorship)\b/.test(text) &&
-        !/\b(?:citizen|permanent resident|do not|don t|not required)\b/.test(text);
-    });
-    if (workAuthorizationOptions.length === 1) return workAuthorizationOptions;
-  }
-  if (/\b(?:visa|sponsorship)\b/i.test(context) && (wanted === 'yes' || /require|need/.test(rawWanted))) {
-    const scratchOption = options.filter(option => /start (?:the )?visa process|from scratch|new visa|initial visa/i.test(option.text));
-    if (scratchOption.length === 1) return scratchOption;
-  }
-  if (/hispanic|latino/.test(question) && (wanted === 'yes' || wanted === 'no')) {
-    const originOptions = options.filter(option => {
-      const text = normalize(option.text);
-      if (wanted === 'yes') return /^(?:yes\b|hispanic\b|latino\b|latina\b|latine\b|i am hispanic\b|i am latino\b|i am latina\b)/.test(text);
-      return /^(?:no\b|not hispanic\b|not latino\b|not latina\b|not latine\b|non hispanic\b|non latino\b|non latina\b|i am not hispanic\b|i am not latino\b|i am not latina\b)/.test(text);
-    });
-    if (originOptions.length === 1) return originOptions;
-  }
-  if (wanted === 'india') {
-    const indiaDial = options.filter(o => /^india(?:\s|$)/i.test(String(o.text || '').trim()) && /\+\s*91\b/.test(String(o.text || '')));
-    if (indiaDial.length === 1) return indiaDial;
-  }
-  const exact = options.filter(o => normalize(o.text) === wanted || normalize(o.value) === wanted);
-  if (exact.length) return exact;
-  if (wanted === 'yes' || wanted === 'no') {
-    const polarityMatches = options.filter(o => optionPolarity(o.text) === wanted);
-    if (polarityMatches.length === 1) return polarityMatches;
-    const relocationChoices = relocationOptionMatches(options, wanted, context);
-    if (relocationChoices.length === 1) return relocationChoices;
-  }
-  if (/\byears? (?:of )?(?:post[- ]graduate |professional |work )?(?:backend |software |engineering )?experience\b|\byears? experience\b|\byoe\b/i.test(question)) {
-    const years = Number(String(value).match(/\d+(?:\.\d+)?/)?.[0]);
-    if (Number.isFinite(years)) {
-      const ranged = options.filter(option => experienceOptionContains(option.text, years));
-      if (ranged.length === 1) return ranged;
-    }
-  }
-  if (/\b(?:city|country|current location|location city)\b/.test(question)) {
-    const geographic = options.filter(option => {
-      const text = normalize(option.text);
-      return wanted && (text === wanted || text.startsWith(`${wanted} `));
-    });
-    if (geographic.length === 1) return geographic;
-    const exactLead = geographic.filter(option => normalize(option.text).split(' ')[0] === wanted);
-    if (exactLead.length === 1) return exactLead;
-  }
-  const aliases = {
-    yes: ['yes', 'i do', 'i will require', 'i require', 'sponsorship required', 'yes i do', 'true', 'yes i will require sponsorship', 'yes i will need sponsorship in the future', 'yes but i will need sponsorship in the future'],
-    no: ['no', 'i do not', 'i will not', 'not required', 'no i do not', 'i have not', 'i have not previously been employed', 'false', 'none', 'never', 'no i need sponsorship now', 'no i will need sponsorship', 'no i need sponsorship'],
-    'i am authorized to work in the country due to my nationality': ['i am authorized to work in the country due to my nationality', 'authorized without restriction', 'citizen'],
-    'authorized without restriction': ['authorized without restriction', 'i am authorized to work in the country due to my nationality', 'citizen'],
-    bengaluru: ['bengaluru', 'bangalore'],
-    bangalore: ['bangalore', 'bengaluru'],
-    man: ['man', 'male', 'he him', 'he him his'], male: ['male', 'man', 'he him', 'he him his'],
-    'he him his': ['he him his', 'he him', 'he/him/his', 'he/him', 'he / him'],
-    asian: ['asian', 'asian indian', 'south asian'], indian: ['indian', 'india', 'india +91', '+91'],
-    india: ['india', 'india +91', '+91', 'indian'],
-    '30 days': ['30 days', '30 day', 'one month', '1 month', '30 days notice period', 'within 30 days', '30 day notice', '30-day notice', '4 weeks', 'four weeks'],
-    'company career page': ['company career page', 'career page', 'career site', 'company website', 'company site', 'job board'],
-    heterosexual: ['heterosexual', 'heterosexual/straight', 'heterosexual straight', 'straight'],
-    'i don t wish to answer': ['i don t wish to answer', 'i don\'t wish to answer', 'prefer not to say', 'i prefer not to say', 'do not wish to answer'],
-  };
-  const candidates = aliases[wanted] || [];
-  const hits = options.filter(option => candidates.some(alias => normalize(option.text) === normalize(alias) || normalize(option.value) === normalize(alias)));
-  if (hits.length === 1) return hits;
-  if (wanted === 'no') {
-    const noHits = options.filter(o => optionPolarity(o.text) === 'no');
-    if (noHits.length === 1) return noHits;
-  }
-  if (wanted === 'yes') {
-    const yesHits = options.filter(o => optionPolarity(o.text) === 'yes');
-    if (yesHits.length === 1) return yesHits;
-  }
-  if (wanted === 'company career page') {
-    const refHits = options.filter(o => {
-      const txt = normalize(o.text);
-      return txt.includes('career') || txt.includes('website') || txt.includes('linkedin') || txt.includes('job board');
-    });
-    if (refHits.length === 1) return refHits;
-    const careerHit = options.filter(o => /career/i.test(o.text));
-    if (careerHit.length === 1) return careerHit;
-    const linkedinHit = options.filter(o => /linkedin/i.test(o.text));
-    if (linkedinHit.length === 1) return linkedinHit;
-    const otherHit = options.filter(o => /^(?:other|other job boards)$/i.test(o.text.trim()));
-    if (otherHit.length === 1) return otherHit;
-  }
-  return similarityMatchOptions(options, value, context);
-}
-
-function noticePeriodOptionMatches(options, value, context) {
-  if (!/notice period|availability|earliest start|start date/i.test(context)) return [];
-  const candidate = normalize(value);
-  const candidateDays = /\b(?:30 days?|1 month|one month|4 weeks?|four weeks?)\b/.test(candidate) ? 30 : null;
-  if (candidateDays == null) return [];
-  const days = (amount, unit) => amount * (/month/.test(unit || '') ? 30 : /week/.test(unit || '') ? 7 : 1);
-  const matches = options.filter(option => {
-    const label = normalize(option.text || option.value);
-    if (candidateDays === 30 && /^(?:1 month|one month|30 days?|4 weeks?|four weeks?)$/.test(label)) return true;
-    const range = label.match(/(\d+(?:\.\d+)?)\s*(days?|weeks?|months?)?\s*(?:-|to)\s*(\d+(?:\.\d+)?)\s*(days?|weeks?|months?)/);
-    if (range) {
-      const unit = range[5] || range[2] || 'days';
-      return candidateDays >= days(Number(range[1]), range[2] || unit) && candidateDays <= days(Number(range[3]), unit);
-    }
-    if (/\b(?:up to|at most|or less|or fewer|within)\b/.test(label)) {
-      const upper = label.match(/(\d+(?:\.\d+)?)\s*(days?|weeks?|months?)/);
-      if (upper) return candidateDays <= days(Number(upper[1]), upper[2]);
-      if (/\b(?:one month|a month|1 month)\b/.test(label)) return candidateDays <= 30;
-    }
-    if (/\b(?:more than|over|above)\b/.test(label)) {
-      const lower = label.match(/(\d+(?:\.\d+)?)\s*(days?|weeks?|months?)/);
-      if (lower) return candidateDays > days(Number(lower[1]), lower[2]);
-    }
-    return false;
-  });
-  return matches;
-}
-
-function relocationOptionMatches(options, wanted, context) {
-  if (!/relocat|move to|willing to move/i.test(context)) return [];
-  const choices = options.filter(option => {
-    const text = String(option.text || '').trim();
-    const positiveIntent = /\b(?:plan|intend|willing|open|need|require)\b.{0,30}\brelocat(?:e|ing|ion)\b/i.test(text) ||
-      /\b(?:based outside|outside the)\b.{0,30}\brelocation\b/i.test(text) ||
-      /\byes\b.{0,30}\brelocat(?:e|ing|ion)\b/i.test(text);
-    const negativeIntent = /\b(?:do not|don t|will not|won t|not willing|not open|unable)\b.{0,35}\b(?:plan|intend|want|wish|relocat(?:e|ing|ion))\b/i.test(text) ||
-      /\bcurrently (?:live|based|located) in\b/i.test(text);
-    if (wanted === 'yes' || (wanted === 'no' && /based in.{0,30}or.{0,30}relocat/i.test(context))) {
-      return positiveIntent && !/\bcurrently based in the (?:uk|us|area)\b/i.test(text);
-    }
-    return negativeIntent;
-  });
-  return choices;
-}
-
-function experienceOptionContains(label, years) {
-  const text = String(label || '').toLowerCase().replace(/,/g, '').trim();
-  const range = text.match(/(\d+(?:\.\d+)?)\s*(?:-|–|—|to)\s*(\d+(?:\.\d+)?)/i);
-  if (range) return years >= Number(range[1]) && years <= Number(range[2]);
-  const lowerBound = text.match(/(\d+(?:\.\d+)?)\s*\+/);
-  if (lowerBound) return years >= Number(lowerBound[1]);
-  const under = text.match(/(?:under|less than|fewer than)\s*(\d+(?:\.\d+)?)/i);
-  if (under) return years < Number(under[1]);
-  const atMost = text.match(/(?:up to|at most|or fewer)\s*(\d+(?:\.\d+)?)/i);
-  if (atMost) return years <= Number(atMost[1]);
-  return false;
-}
-
-function optionPolarity(value) {
-  const text = normalize(value);
-  // A preference not to answer is neither Yes nor No.
-  if (/\b(prefer|decline|wish|rather not|no answer)\b/.test(text)) return null;
-  if (/^(?:no|false)\b/.test(text)) return 'no';
-  if (/^(?:yes|true)\b/.test(text)) return 'yes';
-  if (/\b(?:not|never|without|cannot|can t|don t|doesn t|didn t|won t|will not|do not|does not|did not|not required|not need)\b/.test(text)) return 'no';
-  if (/\b(?:require|requires|requiring|need|needs|will require|will need|sponsorship required)\b/.test(text)) return 'yes';
-  return null;
-}
-
-// Conservative local semantic matching for wording variants. Exact matches,
-// known aliases, and polarity rules above take precedence. Fuzzy selection is
-// allowed only with a high score and a clear lead over every alternative.
-function similarityMatchOptions(options, value, context) {
-  if (isUnsafeChoiceContext(context)) return [];
-  const stopWords = new Set(['a', 'an', 'and', 'are', 'as', 'at', 'be', 'been', 'being', 'by', 'can', 'could', 'did', 'do', 'does', 'for', 'from', 'had', 'has', 'have', 'how', 'i', 'in', 'into', 'is', 'it', 'of', 'on', 'or', 'please', 'the', 'this', 'to', 'was', 'were', 'what', 'when', 'where', 'which', 'who', 'will', 'with', 'would', 'you', 'your']);
-  const synonym = new Map([
-    ['man', 'male'], ['male', 'male'], ['woman', 'female'], ['female', 'female'],
-    ['heterosexual', 'straight'], ['straight', 'straight'],
-    ['sponsor', 'sponsorship'], ['sponsored', 'sponsorship'], ['sponsorship', 'sponsorship'],
-    ['acknowledge', 'acknowledgment'], ['acknowledgment', 'acknowledgment'],
-    ['recognize', 'acknowledgment'], ['recognise', 'acknowledgment'],
-  ]);
-  const tokenize = text => {
-    let normalized = normalize(text);
-    normalized = normalized.replace(/\b(?:do not|does not|did not|will not|won t|don t|doesn t|didn t|can t|cannot|never|without)\b/g, ' negation ');
-    normalized = normalized.replace(/\b(?:yes|true)\b/g, ' affirmative ');
-    normalized = normalized.replace(/\b(?:no|false)\b/g, ' negation ');
-    return new Set(normalized.split(/\s+/).filter(token => token && !stopWords.has(token)).map(token => synonym.get(token) || token));
-  };
-  const query = tokenize(value);
-  if (!query.size) return [];
-  const ranked = options.map(option => {
-    const tokens = tokenize(option.text || option.value);
-    if (!tokens.size) return { option, score: 0 };
-    // Opposite polarity is a hard exclusion, even if other words overlap.
-    if (query.has('negation') && tokens.has('affirmative')) return { option, score: 0 };
-    if (query.has('affirmative') && tokens.has('negation')) return { option, score: 0 };
-    const overlap = [...query].filter(token => tokens.has(token)).length;
-    const containment = overlap / Math.min(query.size, tokens.size);
-    const jaccard = overlap / (query.size + tokens.size - overlap);
-    return { option, score: 0.7 * containment + 0.3 * jaccard };
-  }).sort((a, b) => b.score - a.score);
-  const minimum = query.size === 1 ? 0.84 : 0.76;
-  if (!ranked.length || ranked[0].score < minimum) return [];
-  if (ranked.length > 1 && ranked[0].score - ranked[1].score < 0.16) return [];
-  return [ranked[0].option];
-}
-
 function escapeRegExp(value) { return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 async function attachResume(page, profile) {
@@ -2161,7 +1615,7 @@ async function prepareFinalStep(page, target, profile, cv) {
 }
 
 async function submitAndVerify(page, target, profile, cv) {
-  const persistFaq = () => {
+  const persistFaq = async () => {
     if (target._faqRecorded || !target._faqQuestions?.length) return;
     const unique = new Map();
     for (const item of target._faqQuestions) {
@@ -2169,7 +1623,7 @@ async function submitAndVerify(page, target, profile, cv) {
       const prior = unique.get(key);
       if (!prior || item.answer) unique.set(key, item);
     }
-    recordApplicationFaq(DATA_ROOT, {
+    await recordApplicationFaq(DATA_ROOT, {
       company: target.company || target.name || '',
       role: target.role || target.title || '',
       url: target.url || '',
@@ -2197,7 +1651,7 @@ async function submitAndVerify(page, target, profile, cv) {
   }
   const submit = preparation;
   if (!submit) {
-    persistFaq();
+    await persistFaq();
     console.warn('  ⚠ No final application submit action found; leaving the page open.');
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs < 90000) await page.waitForTimeout(90000 - elapsedMs).catch(() => {});
@@ -2205,7 +1659,7 @@ async function submitAndVerify(page, target, profile, cv) {
     return false;
   }
   clearTimeout(target._diagnosticTimer);
-  persistFaq();
+  await persistFaq();
   const unresolved = await unresolvedRequiredFields(page, profile);
   if (unresolved.length) {
     console.warn(`  ⚠ Auto-submit paused. Required fields still need an answer: ${unresolved.join('; ')}`);

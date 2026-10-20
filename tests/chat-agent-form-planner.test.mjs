@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { requestChatAgentFormPlan } from '../openrouter-runner.mjs';
+import { requestChatAgentFormPlan } from '../lib/chat-agent-form-plan.mjs';
 
 const validPlan = JSON.stringify({
   answers: [{ key: 'text:0', answer: 'Supported answer', supported: true }],
