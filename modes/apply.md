@@ -23,8 +23,8 @@ Interactive mode for when the candidate is filling out an application form in Ch
 
 5c. PROHIBITED → Warn if a form field asks for content the candidate's jurisdiction prohibits (warn-only; candidate decides)
 5e. FIXED TERM → Surface any explicit fixed-term disclosure before drafting (warn-only; continue)
-6. ANALYZE     → Identify ALL visible form questions
-7. GENERATE    → For each question, generate a personalized response
+6. ANALYZE     → Inventory the whole form first: questions, control types, required state, current values, and every offered choice
+7. GENERATE    → Prefill from profile.yml/CV, then FAQS.md; delegate remaining ordinary questions with profile + FAQ context to the active host's native subagent for semantic matching
 7b. SWEEP      → Enumerate the step's required controls and assert each is non-empty before Save/Next/Continue/Submit
 8. PRESENT     → Show formatted responses for copy-paste
 9. PERSIST     → Save the final filled/submitted answers into the report
@@ -372,6 +372,8 @@ Use `application-answers.mjs` when possible to format/upsert the section:
 ```bash
 node application-answers.mjs --report reports/NNN-company-role-date.md --input answers.json --state filled
 ```
+
+Also append the complete form inventory to `{DATA_ROOT}/FAQS.md` for every application attempt: exact question text, input/control type, required flag, all visible options, final answer (if any), and answer provenance (`profile`, `FAQS.md`, native subagent, observed existing value, or unanswered). Include questions that remain unanswered. The runtime helper persists this inventory automatically before the submit attempt. Direct FAQ prefill uses exact question matches after checking profile-backed answers; for remaining questions, the active host's native subagent may use FAQ history to match equivalent intent across alternate wording and option labels, while selecting only an option currently offered. Keep company-specific context with each record. Never reuse an FAQ answer for legal, immigration, eligibility, demographic, consent, salary, or other sensitive fields unless the profile and existing field policy explicitly support it. The FAQ is accumulated application history, not a source of new CV facts. Never store email OTP codes or credentials in it.
 
 ## Step 9 — Post-apply (optional)
 

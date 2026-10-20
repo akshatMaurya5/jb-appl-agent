@@ -2,14 +2,14 @@
 
 The `apply` mode interactive assistant helps you fill out applications for job postings. It reads the form questions in your browser and drafts personalized answers based on your profile and the evaluated report.
 
-**CRITICAL RULE: Career-Ops never submits.**
-The agent prepares the responses, selects the options, and types out the text fields. **You always click Submit.** This ensures you have the final say and gives you a chance to review the application before it is sent.
+**Direct apply requests run end to end.**
+A direct request to apply to a role or a defined batch authorizes the agent to fill and submit the form and complete fresh email OTP verification when available. Search or evaluation alone does not authorize an application. Unsupported required facts, CAPTCHA/Turnstile, and terms that need action-time human confirmation pause the workflow. The tracker changes to `Applied` only after ATS confirmation.
 
 ---
 
 ## 1. How It Works Per ATS
 
-We have field-tested the auto-fill flow across several major ATS platforms (Ashby, Greenhouse, Lever, and Workable). The agent adapts its behavior to handle specific ATS quirks silently:
+We have field-tested the auto-fill flow across several major ATS platforms (Ashby, Greenhouse, Lever, and Workable). The agent adapts its behavior to handle ATS-specific controls, and checks the live control state after selection rather than treating a click or typed search text as proof of a saved answer.
 
 ### Ashby
 
@@ -17,7 +17,17 @@ We have field-tested the auto-fill flow across several major ATS platforms (Ashb
 
 ### Lever
 
-- **Checkboxes and the Captcha Stay Yours:** Lever often pops an hCaptcha challenge when checkboxes or radio buttons are clicked programmatically. The agent therefore auto-fills text, textareas, and standard select dropdowns only, and never touches the checkboxes, the radio buttons, or the captcha widget. It lists every field it skipped along with recommended values, and you tick them, solve the captcha, and submit.
+- Profile location is searched through Lever's autocomplete and selected only when one visible suggestion matches the candidate's city (using state/country details to disambiguate). Typed location text without a registered suggestion does not satisfy the required-field check.
+- Custom radio, checkbox, and dropdown choices are made only when a unique option matches supported profile-backed information, then verified against the control state. Legal, consent, or unsupported questions remain unresolved for review.
+- CAPTCHA challenges are never bypassed. If one appears, complete it in the visible browser; if selection or submission cannot be verified, the tab remains open and the tracker is not marked `Applied`.
+
+### Generic controls and submission
+
+- Native selects, radio groups, and custom/ARIA comboboxes are checked after interaction. Search text in a combobox is not treated as a selected option.
+- For unanswered ordinary fields, the workflow checks trusted profile/CV answers first, then exact safe `FAQS.md` matches, and sends only what remains to the active host's native subagent. Sensitive, legal, eligibility, and consent questions are not delegated.
+- A final submit action is distinguished from general page-level Apply links, and native/ATS validation errors are reported after the click. A click alone is never submission confirmation.
+- Single-field and segmented email verification codes are read back before the verification action is used. Segmented widgets are tried with auto-advance typing and then per-box entry; a code/input-count mismatch stops verification.
+- If a required value cannot be selected or the workflow times out, the current tab stays open for inspection; the next application is not started unless the current submission is confirmed.
 
 ### Workable
 

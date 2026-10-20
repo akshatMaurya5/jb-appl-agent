@@ -42,6 +42,8 @@ This skill finds new, active software engineering opportunities outside India ta
 5. **Liveness & JD Experience Verification:**
    - Verify that the ATS job link is live and accepts applications (via `check-liveness.mjs` or direct API check).
    - Inspect the JD text to verify required experience is strictly within the 1–5 years range before presenting.
+6. **Autonomous Application Compatibility Guard:**
+   - When finding jobs intended for `/apply-job all` autonomous execution, exclude postings whose forms explicitly forbid AI-assisted completion (such as Canonical's mandatory 'answer in your own words / no AI tools' policy accompanied by proprietary high-school score essays) or require original unassisted coding take-homes. Under sequential batch rules, such forms pause required fields for human entry and intentionally stop the batch.
 
 ## Workflow Execution
 1. Read existing URLs from `data/applications.md`, `data/pipeline.md`, and `data/scan-history.tsv`.

@@ -435,7 +435,7 @@ A single-string `modes_dir` (today's default, ~90% of users) behaves exactly as 
 
 **This system is designed for quality, not quantity** — genuine matches, never mass-application spam.
 
-- **NEVER submit an application without the user reviewing it first.** Fill forms, draft answers, generate PDFs -- but always STOP before clicking Submit/Send/Apply. The user makes the final call.
+- **Honor explicit application authorization end to end.** When the user asks to apply to a specific role or authorized batch, the agent may complete and submit the application, including fresh email-code verification when available. Do not infer authorization from a job search or evaluation alone. Stop for unsupported required facts, CAPTCHA/Turnstile, or an agreement/commitment requiring action-time human confirmation. Record `Applied` only after ATS confirmation; stop a batch at the first unconfirmed application.
 - **Strongly discourage low-fit applications.** Below 4.0/5, explicitly recommend against applying; only proceed if the user has a specific reason to override.
 - **Quality over speed.** A well-targeted application to 5 companies beats a generic blast to 50. Guide the user toward fewer, better applications.
 - **Respect recruiters' time.** Only send what's worth reading.
