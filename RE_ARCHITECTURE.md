@@ -379,6 +379,12 @@ approvals.
     from `needs_sponsorship: true`. Found: phone-country combobox clicked
     "India +91" but the registration check read back "India" (fixed in
     §14.2).
+- **First live end-to-end submissions** (native planner enabled via
+  `CAREER_OPS_CLI=claude`): Supabase/Ashby submitted → ATS confirmation →
+  tracker row #75 `Applied` (the first fully autonomous submission). The
+  Palantir and Affirm runs were correctly killed rather than submitted
+  half-filled, and each failure exposed a concrete verifier/filler bug fixed
+  in §14.6.
 - `node test-all.mjs`: all suites green except `openrouter-runner-429-reset`
   (fork drift — the 429/blacklist code is byte-identical to `main`; not part
   of this re-architecture).
@@ -416,10 +422,31 @@ approvals.
    classified category's aliases into every `matchOptions` call site in
    autofill.mjs (10 sites) via the `extraAliases` parameter, with multi-word
    alias-group expansion in `similarityMatchOptions`.
-6. Watchdog demo on a deliberately hung fixture (kill at 3 min + ledger row +
+6. **First live end-to-end submissions (Palantir/Lever, Supabase/Ashby,
+   Affirm/Greenhouse)** — Supabase submitted and confirmed (tracker #75,
+   `Applied`). Palantir and Affirm were killed half-filled; logs pinpointed
+   three more bugs, all fixed:
+   - **Affirm: file-upload group counted as an unanswered choice group** —
+     Greenhouse wraps Resume/CV in `role="group" aria-required="true"
+     class="file-upload"`, which the Ashby-group coverage check read as an
+     unchecked radio/checkbox group ("Ashby choice field") and blocked
+     submit forever. Groups containing a file input are now skipped; the
+     file control itself is still checked.
+   - **Palantir: Lever location suggestion panel never opened** — `fill()`
+     sets the value without firing the key events Lever's autocomplete
+     listens to. The fill path now types a character and backspaces to
+     trigger it; when no suggestion panel appears at all, the required
+     visible input gets the free-text location (Lever's required control is
+     that input, not the hidden structured-selection field), and the
+     coverage check accepts a typed value containing the candidate city.
+   - **Palantir: university dropdown skipped entirely** — its first option
+     is "Click Here (If you encounter an issue…)", which the placeholder
+     test only matched as an exact label, so the select was treated as
+     already answered and never filled. Placeholder matching now accepts
+     `click here` as a prefix; when the school is not among the (thousands
+     of) listed options, the form's own "Other (School Not Listed)" option
+     is selected.
+7. Watchdog demo on a deliberately hung fixture (kill at 3 min + ledger row +
    advance) — pending a fixture.
-7. End-to-end live submissions of the three supervised postings (Lever
-   Palantir, Ashby Supabase, Greenhouse Affirm) with real OTP and the new
-   verify loop — the user's explicit test, in progress.
 8. `data/apply-failures.tsv` tracker-note write-back is note-only by design;
    a future UI could surface the ledger in the dashboard.

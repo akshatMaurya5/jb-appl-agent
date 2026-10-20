@@ -318,6 +318,11 @@ async function fillSemanticFields(page, profile, cv, target) {
       if (!isRegisteredLocationSelection(selected, profile)) {
         await el.scrollIntoViewIfNeeded().catch(() => {});
         await el.fill(profile.city);
+        // Lever's autocomplete listens to real key events; fill() alone leaves
+        // the suggestion panel closed. Type + backspace to trigger it.
+        await el.press('End').catch(() => {});
+        await page.keyboard.type('a').catch(() => {});
+        await page.keyboard.press('Backspace').catch(() => {});
         const suggestions = page.locator('.dropdown-location:visible');
         await suggestions.first().waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
         const suggestionInfo = await suggestions.evaluateAll(nodes => nodes.map((node, index) => ({
@@ -336,7 +341,15 @@ async function fillSemanticFields(page, profile, cv, target) {
           }
         } else {
           const sample = suggestionInfo.slice(0, 5).map(option => option.text).join(' | ');
-          console.warn(`  ⚠ No unique Lever location suggestion matched ${[profile.city, profile.state, profile.country].filter(Boolean).join(', ')}; leaving it unresolved. Suggestions seen: ${sample || '(none)'}`);
+          // No suggestion panel at all: Lever still accepts free text in the
+          // required input, so enter the candidate location rather than block.
+          const freeText = [profile.city, profile.state, profile.country].filter(Boolean).join(', ');
+          if (!suggestionInfo.length && freeText) {
+            await el.fill(freeText).catch(() => {});
+            console.log(`  ✔ Entered location as free text (no suggestion list): ${freeText}`);
+          } else {
+            console.warn(`  ⚠ No unique Lever location suggestion matched ${[profile.city, profile.state, profile.country].filter(Boolean).join(', ')}; leaving it unresolved. Suggestions seen: ${sample || '(none)'}`);
+          }
         }
       }
       continue;
@@ -389,7 +402,14 @@ async function fillSemanticFields(page, profile, cv, target) {
       const optionIndex = explicitDecision ? undefined : answerPlan.choices.get(`native:${i}`);
       if (Number.isInteger(optionIndex) && optionIndex >= 0 && optionIndex < options.length) matches = [options[optionIndex]];
     }
-    const match = uniqueOptionMatch(matches);
+    let match = uniqueOptionMatch(matches);
+    // University dropdowns list thousands of schools; when the profile school
+    // is not among them, the form's own "Other (School Not Listed)" option is
+    // the intended truthful answer.
+    if (!match && /(?:universit|school|college)/i.test(ctx)) {
+      const schoolFallback = options.filter(option => /school not listed/i.test(option.text));
+      if (schoolFallback.length === 1) match = schoolFallback[0];
+    }
     if (match) {
       try {
         await el.selectOption(match.value);
@@ -1268,7 +1288,12 @@ async function diagnoseStuckForm(page, target, profile, cv, elapsedMs) {
 
 async function unresolvedRequiredFields(page, profile = {}) {
   const locationSelection = await page.locator('#selected-location').inputValue().catch(() => '');
-  const leverLocationRegistered = isRegisteredLocationSelection(locationSelection, profile);
+  const typedLocation = await page.locator('#location-input').inputValue().catch(() => '');
+  // Accept a free-text location entry when the board's suggestion list never
+  // opens: Lever's required control is the visible input, not the hidden
+  // structured-selection field.
+  const leverLocationRegistered = isRegisteredLocationSelection(locationSelection, profile) ||
+    Boolean(profile.city && normalize(typedLocation).includes(normalize(profile.city)));
   return page.evaluate(({ knownLanguages, leverLocationRegistered }) => {
     const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
     const normalized = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -1358,6 +1383,9 @@ async function unresolvedRequiredFields(page, profile = {}) {
     const ashbyGroups = [...document.querySelectorAll('.ashby-application-form-input-radio-group, .ashby-application-form-input-checkbox-group, .ashby-application-form-input-yesno, [role="radiogroup"], [role="group"][aria-required="true"]')];
     const missingAshby = ashbyGroups.filter(grp => {
       if (!visible(grp)) return false;
+      // File-upload wrappers are role=group aria-required on Greenhouse but can
+      // never contain a checked input; the file input itself is checked above.
+      if (grp.matches('.file-upload, [class*="file-upload" i]') || grp.querySelector('input[type="file"]')) return false;
       const isReq = grp.matches('[aria-required="true"]') || grp.querySelector('[class*="required" i]') ||
         !!grp.closest('[aria-required="true"]') || !!grp.querySelector('input[required]');
       if (!isReq) return false;
