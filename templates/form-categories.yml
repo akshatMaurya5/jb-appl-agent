@@ -260,6 +260,7 @@ categories:
       - 'based in'
       - 'reside in'
       - 'live in'
+      - 'currently located'
     excludes:
       - 'relocat'
       - 'office'
@@ -421,6 +422,8 @@ categories:
       - 'personal website'
       - '\bwebsite\b'
       - 'link to a paper'
+      - 'twitter (profile|url|link|handle)'
+      - '\bx profile\b'
       - 'blog post'
       - 'other relevant url'
     excludes: []
@@ -749,6 +752,7 @@ categories:
     llm_allowed: false
     question_patterns:
       - 'how did you hear'
+      - 'how did you know'
       - 'heard about'
       - 'referral'
       - 'who referred'
@@ -804,6 +808,7 @@ categories:
     question_patterns:
       - 'proud of'
       - 'proudest'
+      - 'most impressive'
     excludes: []
     answer:
       source: planner
@@ -831,6 +836,21 @@ categories:
     option_aliases: []
 
   # ---- Misc yes/no context ----
+  - id: essay-additional
+    priority: 104
+    sensitive: false
+    llm_allowed: true
+    question_patterns:
+      - 'cover letter'
+      - 'additional information'
+      - 'anything else (you|you d|you would|you want)'
+      - 'anything you want to share'
+    excludes:
+      - 'upload'
+      - 'attach'
+    answer:
+      source: planner
+    option_aliases: []
   - id: misc-manager-notified
     priority: 110
     sensitive: false
