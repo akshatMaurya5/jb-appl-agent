@@ -21,6 +21,7 @@ import { callActiveAgentFormPlanner } from './lib/active-agent-form-planner.mjs'
 import { checkLivenessViaApi } from './liveness-api.mjs';
 import { findFaqAnswer, readReusableFaq, recordApplicationFaq } from './lib/application-faq.mjs';
 import { answerQuestion, explicitApplicationAnswer } from './lib/form-answer-engine.mjs';
+import { mandatoryCoverageLoop, verifyRounds } from './lib/form-verify.mjs';
 import { isPlaceholderChoice, isRegisteredLocationSelection, selectedValueMatches, uniqueLocationSuggestion, uniqueOptionMatch } from './lib/autofill-form-utils.mjs';
 import {
   normalize, isUnsafeChoiceContext, requiresExplicitDecision,
@@ -1593,6 +1594,17 @@ async function prepareFinalStep(page, target, profile, cv) {
     await attachResume(page, profile);
     const finalButton = await findSubmitButton(page);
     if (finalButton) return finalButton;
+    // Two-stage verify: fill -> fresh mandatory re-check -> fill leftovers.
+    // Only advance or submit at 100% mandatory coverage.
+    const coverage = await mandatoryCoverageLoop({
+      fill: () => fillSemanticFields(page, profile, cv, target),
+      unresolved: () => unresolvedRequiredFields(page, profile),
+      rounds: verifyRounds(profile),
+    });
+    if (!coverage.ok) {
+      console.warn(`  ⚠ Step ${step + 1} needs required answers before continuing: ${coverage.unresolved.join('; ')}`);
+      return null;
+    }
     const nextButton = page.getByRole('button', { name: /^(continue|continue application|next|save and continue|save & continue)$/i }).first();
     const inputSubmit = page.locator('input[type="submit"]').first();
     let advance = await nextButton.isVisible().catch(() => false) ? nextButton : null;
@@ -1601,11 +1613,6 @@ async function prepareFinalStep(page, target, profile, cv) {
       if (/^(continue|next|save and continue|save & continue)$/i.test(label.trim())) advance = inputSubmit;
     }
     if (!advance) return null;
-    const unresolved = await unresolvedRequiredFields(page, profile);
-    if (unresolved.length) {
-      console.warn(`  ⚠ Step ${step + 1} needs required answers before continuing: ${unresolved.join('; ')}`);
-      return null;
-    }
     await advance.click();
     await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
     await page.waitForTimeout(500);
