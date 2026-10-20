@@ -96,21 +96,34 @@ answered here or left blank; they NEVER reach an LLM.
 **Tier 3 — FAQ similarity (the matcher).** See §4. Deterministic, zero LLM
 cost.
 
-**Tier 4 — native sub-agent.** Only leftover **non-sensitive** questions reach
-the planner (`lib/planner-dispatch.mjs`): it hands the full form inventory, the
-unanswered questions, the trusted profile/CV, and the FAQ history (explicitly
-flagged as lower-trust precedent) to a **native** sub-agent. Every answer is
-accepted only with `supported: true`; every option choice only at
-`confidence ≥ 0.8` AND only if the option actually exists on the current form.
-No planner available → `null`, never an invented answer. Sensitive categories
-never reach this tier, and pages with "answer in your own words" + AI-content
-prohibitions skip it entirely.
+**Tier 4 — native sub-agent.** Leftovers (including sensitive/eligibility
+questions the deterministic tiers could not answer) reach the planner
+(`lib/planner-dispatch.mjs`): it hands the full form inventory, the unanswered
+questions, the trusted profile/CV, and the FAQ history (explicitly flagged as
+lower-trust precedent) to a **native** sub-agent. Every answer is accepted
+only with `supported: true`; every option choice only at `confidence ≥ 0.8`
+AND only if the option actually exists on the current form. No planner
+available → `null`, never an invented answer.
+
+**Sensitive questions are answered, grounded, never invented (user
+policy).** The planner prompt explicitly requires sensitive/eligibility
+questions (visa, sponsorship, work authorization, citizenship, salary,
+demographics, relocation) to be answered whenever the profile grounds them
+(`location.authorized_in` / `needs_sponsorship` / `visa_status`,
+`location.country`, `candidate.demographics`,
+`compensation.salary_form_policy`) or a meaning-equivalent FAQ precedent
+exists — and a sensitive option choice must be an **exact listed option**,
+never a paraphrase. The one class that never reaches the planner:
+consent/attestation/legal/data-transfer/privacy acknowledgements — those are
+governed exclusively by the candidate's explicit per-company
+`application_authorizations` in the profile. Pages with "answer in your own
+words" + AI-content prohibitions still skip the planner entirely.
 
 **Does the matcher consult an LLM for similarity? No.** Question-to-question
 similarity is a deterministic token-set Dice coefficient computed in code
-(§4). The LLM tier is only the final fallback for genuinely new non-sensitive
-questions — and even there the LLM is a native sub-agent of the host CLI, not
-an OpenRouter call.
+(§4). The LLM tier is only the final fallback for genuinely new questions —
+and even there the LLM is a native sub-agent of the host CLI, not an
+OpenRouter call.
 
 ## 4. The matcher: FAQ reuse by similarity
 
@@ -142,9 +155,12 @@ affirmative/negative polarity tokens tagged). Guards:
 
 - **Polarity is a hard exclusion**: a Yes-answer option never matches a
   No-answer question, whatever the overlap.
-- **Sensitive gating**: salary/visa/authorization/legal/consent questions are
-  excluded from fuzzy matching entirely — only exact, explicitly recorded
-  answers are reused for those.
+- **Legal gating**: consent/attestation/arbitration/terms/privacy/data
+  questions are excluded from fuzzy matching entirely (`FAQ_LEGAL`) — those
+  are authorization-gated, never semantically reused. Other sensitive
+  families (visa, authorization, salary, demographics) **may** reuse prior
+  answers (user policy: "answer all questions, sensitive as well"); they are
+  primarily answered deterministically from the profile.
 - **Option precedents**: when a stored entry has a chosen option text, that
   text is tried against the current options before similarity is consulted.
 - **Conservative option selection**: a fuzzy option match needs a score of
@@ -282,8 +298,11 @@ field dump.
 - Source-of-Truth: keywords reformulated, never fabricated; authorship claims
   non-negotiable; answers come only from `config/profile.yml` / `cv.md` /
   `FAQS.md` (which records provenance on every entry).
-- Sensitive/legal/consent/eligibility categories are `llm_allowed: false` —
-  deterministic only.
+- Sensitive/eligibility categories are `llm_allowed: false` in the
+  **deterministic** tiers; when those tiers cannot answer, the planner tier
+  answers them **grounded in profile facts or exact listed options only**
+  (never invented). Consent/legal/attestation/data-transfer/privacy fields
+  are profile-approval-gated and never reach the planner.
 - CAPTCHA always stops the job (never bypassed).
 - `Applied` is recorded only after ATS confirmation; killed jobs get a
   note-only tracker update, never `Applied`.
@@ -350,12 +369,16 @@ approvals.
     The planner correctly refused to invent a cross-vendor CLI and the
     deterministic tiers covered everything.
   - Greenhouse (Affirm, Remote Spain — visa sponsorship provided): 18
-    controls, 100% mandatory coverage. The visa/eligibility cluster answered
-    deterministically — "work remotely from Spain…" authorization question,
-    "If you are not an EU citizen, what is your citizenship?" → India, Yes/No
-    sponsorship combos from `needs_sponsorship: true`. Found: phone-country
-    combobox clicked "India +91" but the registration check read back "India"
-    (fixed in §14.2).
+    controls. The candidate's screenshot audit found **four wrong/unfilled
+    mandatory answers the verify loop missed** — the root cause being that
+    Greenhouse marks mandatory with `*`/`✱` in labels, never the `required`
+    attribute (fixed in §14.3), plus three answer-category bugs (fixed in
+    §14.4). The visa/eligibility cluster itself answered deterministically —
+    "work remotely from Spain…" authorization question, "If you are not an EU
+    citizen, what is your citizenship?" → India, Yes/No sponsorship combos
+    from `needs_sponsorship: true`. Found: phone-country combobox clicked
+    "India +91" but the registration check read back "India" (fixed in
+    §14.2).
 - `node test-all.mjs`: all suites green except `openrouter-runner-429-reset`
   (fork drift — the 429/blacklist code is byte-identical to `main`; not part
   of this re-architecture).
@@ -371,9 +394,32 @@ approvals.
 2. **Phone-country combobox registration** (found on Greenhouse) — fixed:
    `registeredOptionMatches` strips trailing dial codes and accepts
    containment, so "India +91" registering as "India" counts as selected.
-3. Watchdog demo on a deliberately hung fixture (kill at 3 min + ledger row +
+3. **Greenhouse `*`-label mandatory detection** (found in the Affirm audit)
+   — fixed: `unresolvedRequiredFields` now treats a control as mandatory when
+   its own label/aria-label or its fieldset legend ends with `*`/`✱`
+   (`asteriskMarked`), so the verify loop gates on what the form actually
+   marks. Needs a live Greenhouse re-run to confirm.
+4. **Affirm answer-category bugs** (found in the same audit) — all fixed:
+   - "What is your current country of residence?" → had answered "Yes":
+     `relocation-willingness` now guards country-of-residence wording and
+     returns `profile.country` ("India").
+   - "If you are not an EU citizen, what is your citizenship?" → had answered
+     "No": `citizenship-nationality` now tests the yes/no EU-citizen form
+     first and only then maps what/which-citizenship → "India".
+   - "How did you first learn about {company}?" → was unfilled: `referral-source`
+     patterns extended (`first learn about`, `learn about (us|this company)`,
+     `how did you find`) and its `option_aliases` widened.
+   - "Have you previously been employed at {company}?" → was unfilled:
+     `misc-previously-employed` pattern now matches "previously been employed".
+5. **Taxonomy `option_aliases` were loaded but never threaded into the
+   matcher** — fixed: `optionAliasesFor` (form-answer-engine.mjs) feeds the
+   classified category's aliases into every `matchOptions` call site in
+   autofill.mjs (10 sites) via the `extraAliases` parameter, with multi-word
+   alias-group expansion in `similarityMatchOptions`.
+6. Watchdog demo on a deliberately hung fixture (kill at 3 min + ledger row +
    advance) — pending a fixture.
-4. One supervised live submission with real OTP on a test posting (the
-   user's call — will pick a real opening and test end-to-end).
-5. `data/apply-failures.tsv` tracker-note write-back is note-only by design;
+7. End-to-end live submissions of the three supervised postings (Lever
+   Palantir, Ashby Supabase, Greenhouse Affirm) with real OTP and the new
+   verify loop — the user's explicit test, in progress.
+8. `data/apply-failures.tsv` tracker-note write-back is note-only by design;
    a future UI could surface the ledger in the dashboard.

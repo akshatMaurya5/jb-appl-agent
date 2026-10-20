@@ -754,6 +754,9 @@ categories:
       - 'how did you hear'
       - 'how did you know'
       - 'heard about'
+      - 'first learn about'
+      - 'learn about (us|this company)'
+      - 'how did you find'
       - 'referral'
       - 'who referred'
     excludes: []
@@ -761,7 +764,7 @@ categories:
       source: profile
       key: candidate.demographics.referral_source
     option_aliases:
-      - ['company career page', 'careers page', 'company website', 'career site']
+      - ['company career page', 'careers page', 'company website', 'career site', 'company career site', 'careers website', 'career website']
 
   # ---- Essays & self-assessment (planner-eligible) ----
   - id: essay-background
@@ -890,7 +893,7 @@ categories:
     sensitive: false
     llm_allowed: false
     question_patterns:
-      - 'previously employed'
+      - 'previously (?:been )?employed'
       - 'worked (here|for us|at this company) before'
       - 'former employee'
       - 'prior employment'
