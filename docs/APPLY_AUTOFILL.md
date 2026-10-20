@@ -17,17 +17,18 @@ We have field-tested the auto-fill flow across several major ATS platforms (Ashb
 
 ### Lever
 
-- Profile location is searched through Lever's autocomplete and selected only when one visible suggestion matches the candidate's city (using state/country details to disambiguate). Typed location text without a registered suggestion does not satisfy the required-field check.
+- Profile location is searched through Lever's autocomplete and selected only when one visible suggestion matches the candidate's city (using state/country details to disambiguate). When the board has no city entry, the fallback chain selects a unique saved-state option, then a unique saved-country option (`locationSuggestionWithFallback`). Typed location text without a registered suggestion does not satisfy the required-field check.
 - Custom radio, checkbox, and dropdown choices are made only when a unique option matches supported profile-backed information, then verified against the control state. Legal, consent, or unsupported questions remain unresolved for review.
 - CAPTCHA challenges are never bypassed. If one appears, complete it in the visible browser; if selection or submission cannot be verified, the tab remains open and the tracker is not marked `Applied`.
 
 ### Generic controls and submission
 
 - Native selects, radio groups, and custom/ARIA comboboxes are checked after interaction. Search text in a combobox is not treated as a selected option.
-- For unanswered ordinary fields, the workflow checks trusted profile/CV answers first, then exact safe `FAQS.md` matches, and sends only what remains to the active host's native subagent. Sensitive, legal, eligibility, and consent questions are not delegated.
+- The answer ladder per field: explicit per-company `application_answers` → deterministic category engine (`lib/form-answer-engine.mjs` over `templates/form-categories.yml`, values resolved from `config/profile.yml`/`cv.md`) → FAQ similarity tiers (exact → similarity → category-scoped, `FAQS.md`) → the active host's native subagent for ordinary leftovers only. Sensitive, legal, eligibility, and consent questions never leave the deterministic tier.
+- After the fill pass, the two-stage verify loop re-inventories the visible form, refills still-empty required fields through the ladder, and re-checks — up to `autofill.watchdog.verify_rounds` (default 3) per step. Submission proceeds only at 100% mandatory coverage; non-mandatory fields may stay blank.
 - A final submit action is distinguished from general page-level Apply links, and native/ATS validation errors are reported after the click. A click alone is never submission confirmation.
-- Single-field and segmented email verification codes are read back before the verification action is used. Segmented widgets are tried with auto-advance typing and then per-box entry; a code/input-count mismatch stops verification.
-- If a required value cannot be selected or the workflow times out, the current tab stays open for inspection; the next application is not started unless the current submission is confirmed.
+- Single-field and segmented email verification codes are read back before the verification action is used. Segmented widgets are tried with auto-advance typing and then per-box entry; a code/input-count mismatch stops verification. A failed verify click clears the boxes and re-fetches a fresh code (max 2 attempts); after verification, a still-visible submit action is followed up on up to 3 times. The OTP email wait runs on its own budget and does not consume the per-job watchdog budget.
+- In interactive mode, if a required value cannot be selected or the workflow times out, the current tab stays open for inspection; the next application is not started unless the current submission is confirmed. In the autonomous background runner, the job's page is killed at its watchdog budget (`autofill.watchdog.job_timeout_seconds`, default 180s), the failure is appended to `data/apply-failures.tsv`, and the queue advances; the tracker row gets a note only — never `Applied`.
 
 ### Workable
 
@@ -61,6 +62,6 @@ This saves you from spending time tailoring responses for a job that the ATS wil
 
 ## 3. Troubleshooting
 
-- **Agent hangs or crashes mid-form:** This usually happens when an ATS updates its React DOM unexpectedly or pops a hidden captcha. When this happens, look at the agent's output—it always prints a complete list of generated answers. You can easily copy and paste the remaining answers manually.
+- **Agent hangs or crashes mid-form:** This usually happens when an ATS updates its React DOM unexpectedly or pops a hidden captcha. In autonomous background runs the watchdog kills the job at its budget and appends the reason to `data/apply-failures.tsv` (with a cooldown so it is not retried immediately); the queue moves on. Look at the agent's output—it always prints a complete list of generated answers. You can easily copy and paste the remaining answers manually.
 - **Form changes:** If you notice the form on screen is for a different role than the one evaluated in your report, the agent will detect it and ask if you want to adapt the responses to the new title or stop and re-evaluate.
 - **Multiple roles in one session:** Running batch applies? Always run a **Liveness sweep** (`node check-liveness.mjs --file data/pipeline.md`) first to drop dead postings from your pipeline so you never waste time opening an expired role tab.

@@ -29,6 +29,7 @@ import { walkTree } from '../lib/walk-tree.mjs';
  */
 export const GUARDED_PATHS = [
   'cv.md',
+  'FAQS.md',
   'article-digest.md',
   'voice-dna.md',
   'portals.yml',

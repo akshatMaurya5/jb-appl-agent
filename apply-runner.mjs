@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { watchdogConfig, recordApplyFailure, recentFailureFor } from './lib/watchdog.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 export function readTargets() {
@@ -145,8 +146,7 @@ async function runCycle({ limit, dryRun }) {
   return { attempted, skipped, failed, timedOut, exhausted: budget.length === targets.length && failed === 0 && timedOut === 0 };
 }
 
-const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (isMain) {
+if (isMainModule(import.meta.url)) {
   const args = process.argv.slice(2);
   const flag = name => args.includes(`--${name}`);
   const valueAfter = name => {

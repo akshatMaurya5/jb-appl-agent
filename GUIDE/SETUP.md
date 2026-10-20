@@ -76,10 +76,10 @@ Choose **one** of the two supported approaches:
 - Create a new App Password named `CareerOps`.
 - Copy the 16-character password into `.env`:
   ```env
-  GMAIL_ADDRESS=your.name@gmail.com
+  GMAIL_USER=your.name@gmail.com
   GMAIL_APP_PASSWORD=abcd efgh ijkl mnop
   ```
-- The helper script [`tools/fetch-verification-code.py`](../tools/fetch-verification-code.py) will connect securely over SSL IMAP (`imap.gmail.com:993`) to retrieve incoming verification emails.
+- OTP retrieval runs through the already-signed-in macOS Mail inbox via [`tools/fetch-verification-code-mail.py`](../tools/fetch-verification-code-mail.py) first; the Gmail App Password here feeds the `gmail-assistant` MCP fallback (stdio JSON-RPC server in [`tools/gmail-mcp-server.py`](../tools/gmail-mcp-server.py)) when Mail has no trustworthy fresh match.
 
 ---
 
@@ -101,7 +101,7 @@ The assistant will guide you through all required questions (personal details, a
    ```
 2. Open [`config/profile.yml`](../config/profile.yml) in your editor and fill in your details:
    - **`full_name`**, **`email`**, **`phone`**, **`city`**, **`state`**, **`country`**, **`postal_code`**
-   - **`resume_path`**: Absolute path to your master resume PDF (e.g. `/Users/yourname/Documents/Resume.pdf`).
+   - **`resume_path`**: Absolute path to your master resume PDF (e.g. `~/Documents/Resume.pdf`).
    - **`linkedin`**, **`github`**, **`portfolio_url`**
    - **`demographics`**: Gender, race/ethnicity, veteran status, disability, pronouns.
    - **`work_authorization`**: Countries where you have legal work rights and sponsorship requirements for international onsite roles.

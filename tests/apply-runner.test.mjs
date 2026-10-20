@@ -5,10 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readTargets } from '../apply-runner.mjs';
 
-// readTargets resolves the data root from CAREER_OPS_DATA_DIR, so point it at
-// a fixture directory instead of the user's real tracker data.
+// readTargets resolves the data root from CAREER_OPS_ROOT first (an inherited
+// one from the harness would otherwise outrank the fixture), so pin BOTH:
+// set the high-precedence var to the fixture and clear the lower one.
 const root = mkdtempSync(join(tmpdir(), 'apply-runner-'));
-process.env.CAREER_OPS_DATA_DIR = root;
+delete process.env.CAREER_OPS_DATA_DIR;
+process.env.CAREER_OPS_ROOT = root;
 try {
   mkdirSync(join(root, 'data'), { recursive: true });
   writeFileSync(join(root, 'data/last-found-jobs.json'), JSON.stringify([
@@ -36,18 +38,18 @@ try {
 
   test('readTargets tolerates missing source files', () => {
     const emptyRoot = mkdtempSync(join(tmpdir(), 'apply-runner-empty-'));
-    process.env.CAREER_OPS_DATA_DIR = emptyRoot;
+    process.env.CAREER_OPS_ROOT = emptyRoot;
     try {
       assert.deepEqual(readTargets(), []);
     } finally {
-      process.env.CAREER_OPS_DATA_DIR = root;
+      process.env.CAREER_OPS_ROOT = root;
       rmSync(emptyRoot, { recursive: true, force: true });
     }
   });
 } finally {
   // node:test runs tests after this module body; defer cleanup to exit.
   process.on('exit', () => {
-    delete process.env.CAREER_OPS_DATA_DIR;
+    delete process.env.CAREER_OPS_ROOT;
     rmSync(root, { recursive: true, force: true });
   });
 }

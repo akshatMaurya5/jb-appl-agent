@@ -285,6 +285,56 @@ silently discarding the evaluation itself.
 
 ---
 
+## 4. Automate the background apply loop
+
+Once discovery (section 1) has populated `data/last-found-jobs.json` /
+`data/pipeline.md`, the background runner can apply end-to-end without a
+session: each target runs as its own `node autofill.mjs <url>` child with a
+SIGKILL deadline from the watchdog config, failures land in
+`data/apply-failures.tsv`, and jobs in cooldown are skipped. One cycle per
+scheduler tick is the robust shape — a wedged child can never block a tick.
+
+### cron (one cycle every 30 minutes)
+
+```cron
+*/30 * * * * cd /path/to/career-ops && node apply-runner.mjs --limit 3 >> apply-runner.log 2>&1
+```
+
+### launchd (same idea, survives sleep)
+
+`~/Library/LaunchAgents/com.career-ops.apply.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.career-ops.apply</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/path/to/career-ops/apply-runner.mjs</string>
+    <string>--limit</string><string>3</string>
+  </array>
+  <key>WorkingDirectory</key><string>/path/to/career-ops</string>
+  <key>StartInterval</key><integer>1800</integer>
+  <key>StandardOutPath</key><string>/tmp/career-ops-apply.log</string>
+  <key>StandardErrorPath</key><string>/tmp/career-ops-apply.log</string>
+</dict>
+</plist>
+```
+
+Load it once with `launchctl load ~/Library/LaunchAgents/com.career-ops.apply.plist`.
+
+**Guardrails built into the runner:** a target whose recent failure is within
+`autofill.watchdog.cooldown_minutes` is skipped, a child that outlives its
+deadline is SIGKILLed without losing the rest of the queue, and the tracker
+is only ever updated with a note for failed jobs — `Applied` still requires
+ATS confirmation from inside the child. `--dry-run` prints the cycle plan
+without spawning anything; run that first.
+
+---
+
 ## How this fits the rest of career-ops
 
 - **Zero-token by default.** Scheduling and triage cost nothing; only the eval you

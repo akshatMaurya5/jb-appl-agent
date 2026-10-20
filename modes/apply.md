@@ -274,7 +274,15 @@ For every free-text field, inspect the **rendered form control** before drafting
 
 ## Step 7 — Generate responses
 
-For each question, generate the response following:
+Deterministic questions (identity, contact, location, demographics, education,
+work-authorization, visa sponsorship, notice period, salary, start date,
+referral source) are answered by the category engine (`lib/form-answer-engine.mjs`)
+directly from `config/profile.yml`/`cv.md` — never through essay generation.
+Only free-text motivation/fit questions use the path below, and reusable Q&A
+pairs are resolved through the FAQ similarity tiers (exact → similarity →
+category-scoped) before any planner is consulted.
+
+For each remaining question, generate the response following:
 
 1. **Report context**: Use proof points from block B, STAR stories from block F
 2. **Previous Section H / Application Answers**: If a draft or final response exists, use it as a base and refine
@@ -338,15 +346,22 @@ below).
    field is not missing.
 4. Fill what is missing: profile and CV fields from the Step 4b sources, and
    question-style fields (motivation, "why this role", free-text prompts) through
-   the Step 7 generation path. Re-read each one to confirm the value registered.
-5. Repeat 1-4 until the list stops changing. A fill can CREATE required controls:
+   the Step 7 generation path (profile → category engine → FAQ similarity →
+   native sub-agent for ordinary leftovers only). Re-read each one to confirm the value registered.
+5. Repeat 1-4 until the list stops changing, capped at
+   `config/profile.yml → autofill.watchdog.verify_rounds` (default 3). A fill can CREATE required controls:
    answering a disclosure "Yes" reveals its follow-up, and picking a country can
    swap in a region field. An inventory taken before those controls existed cannot
    contain them, so a single pass surveys the form as it was, not as it is.
 6. Click Save, Next or Continue only once a full pass adds no new required
-   control and every control on the list reads non-empty. Submit is the candidate's
-   click, never the agent's, so the same pass has to come back clean before the
-   form is handed over for it.
+   control and every control on the list reads non-empty. In **interactive**
+   mode, Submit is the candidate's click, never the agent's, so the same pass
+   has to come back clean before the form is handed over for it. In the
+   **autonomous** path (background runner with the user's explicit
+   authorization), the same clean pass gates an auto-submit — and a step that
+   cannot reach 100% mandatory coverage within the rounds cap is recorded in
+   `data/apply-failures.tsv` and the job is killed and skipped, never submitted
+   half-filled.
 
 If a required field cannot be filled from the candidate's own sources, stop and ask
 before Save, Next, Continue, or Submit. Saving a step to see which errors come
