@@ -400,10 +400,15 @@ approvals.
     §14.2).
 - **First live end-to-end submissions** (native planner enabled via
   `CAREER_OPS_CLI=claude`): Supabase/Ashby submitted → ATS confirmation →
-  tracker row #75 `Applied` (the first fully autonomous submission). The
-  Palantir and Affirm runs were correctly killed rather than submitted
-  half-filled, and each failure exposed a concrete verifier/filler bug fixed
-  in §14.6.
+  tracker row #75 `Applied` (the first fully autonomous submission).
+  Affirm/Greenhouse then submitted → **emailed 8-character security code read
+  from macOS Mail and entered automatically → ATS confirmation → tracker row
+  #76 `Applied`** — the full zero-human-intervention workflow, including the
+  email-code step. Earlier Palantir and Affirm runs were correctly killed
+  rather than submitted half-filled, and each failure exposed a concrete
+  verifier/filler bug fixed in §14.6 (Greenhouse file-upload group
+  false-positive, Lever location tie, university placeholder, phone vs
+  phone-country swap, code-input-over-CAPTCHA priority).
 - `node test-all.mjs`: all suites green except `openrouter-runner-429-reset`
   (fork drift — the 429/blacklist code is byte-identical to `main`; not part
   of this re-architecture).
