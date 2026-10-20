@@ -23,7 +23,7 @@ import { answerQuestion, explicitApplicationAnswer } from './lib/form-answer-eng
 import { mandatoryCoverageLoop, verifyRounds } from './lib/form-verify.mjs';
 import { watchdogConfig, raceWithDeadline, killJobPage, recordApplyFailure } from './lib/watchdog.mjs';
 import { runOtpFlow } from './lib/otp-flow.mjs';
-import { isPlaceholderChoice, isRegisteredLocationSelection, selectedValueMatches, uniqueLocationSuggestion, uniqueOptionMatch } from './lib/autofill-form-utils.mjs';
+import { isPlaceholderChoice, isRegisteredLocationSelection, locationSuggestionWithFallback, selectedValueMatches, uniqueLocationSuggestion, uniqueOptionMatch } from './lib/autofill-form-utils.mjs';
 import {
   normalize, isUnsafeChoiceContext, requiresExplicitDecision,
   approvedLegalAcknowledgementOptions, locationOptionMatches, privacyAcknowledgementOptions,
@@ -316,12 +316,13 @@ async function fillSemanticFields(page, profile, cv, target) {
           index,
           text: (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim(),
         })).filter(option => option.text));
-        const match = uniqueLocationSuggestion(suggestionInfo, profile);
-        if (match) {
+        const fallback = locationSuggestionWithFallback(suggestionInfo, profile);
+        if (fallback) {
+          const match = fallback.match;
           await suggestions.nth(match.index).click();
           const registered = await page.locator('#selected-location').inputValue().catch(() => '');
           if (isRegisteredLocationSelection(registered, profile)) {
-            console.log(`  ✔ Selected Lever location: ${match.text}`);
+            console.log(`  ✔ Selected Lever location (${fallback.level} match): ${match.text}`);
           } else {
             console.warn(`  ⚠ Lever location suggestion did not register as a selection: ${match.text}`);
           }

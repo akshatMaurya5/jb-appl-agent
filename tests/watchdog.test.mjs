@@ -35,7 +35,7 @@ test('killJobPage closes the page without running beforeunload', async () => {
   await killJobPage({ close: async () => { throw new Error('already closed'); } }, 'does not throw on a dead page');
 });
 
-test('recordApplyFailure appends a header then rows; recentFailureFor honors cooldown', () => {
+test('recordApplyFailure appends a header then rows; recentFailureFor honors cooldown', async () => {
   const root = mkdtempSync(join(tmpdir(), 'watchdog-'));
   try {
     const path = applyFailuresPath(root);
@@ -47,6 +47,7 @@ test('recordApplyFailure appends a header then rows; recentFailureFor honors coo
     assert.ok(lines[1].includes('job-timeout\tfill\t180000\t1\t'), 'row carries reason, phase, elapsed, planner flag, epoch');
     const recent = recentFailureFor(root, { company: 'Acme', role: 'SWE' }, 60);
     assert.ok(recent && recent.reason === 'job-timeout', 'recent failure within cooldown is found');
+    await new Promise(resolve => setTimeout(resolve, 5)); // let the row's epoch age past a 0-minute cooldown
     assert.equal(recentFailureFor(root, { company: 'Acme', role: 'SWE' }, 0), null, 'expired cooldown misses');
     assert.equal(recentFailureFor(root, { company: 'Acme', role: 'PM' }, 60), null, 'different role at the same company is not a match');
     assert.equal(recentFailureFor(root, { url: 'https://b.test/job' }, 60).reason, 'no-form', 'url key matches');
