@@ -393,7 +393,10 @@ categories:
     option_aliases: []
 
   - id: identity-contact
-    priority: 41
+    # Above location-*: a phone control's wrapper often includes the sibling
+    # "Phone Country*" label, which would otherwise classify the phone field
+    # as a country question and fill it with the country name.
+    priority: 15
     sensitive: false
     llm_allowed: false
     question_patterns:
@@ -401,6 +404,9 @@ categories:
       - 'phone number'
       - 'mobile number'
       - 'contact number'
+      - '\bphone\b'
+      - '\bmobile\b'
+      - '\btelephone\b'
     excludes: []
     answer:
       source: profile

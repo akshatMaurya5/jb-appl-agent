@@ -366,7 +366,11 @@ async function fillSemanticFields(page, profile, cv, target) {
     const isDataTransferConsent = /data transfer|cross[ -]?border transfer|gdpr|data processing consent|personal data transfer/i.test(ctx);
     const isContactField = type === 'tel' || type === 'email' || /\b(?:phone|mobile|telephone|email|first name|last name|full name|legal name|linkedin|github)\b/i.test(ctx);
     const directAnswer = explicitApplicationAnswer(ctx, target, profile);
-    const value = isDataTransferConsent ? '' : (directAnswer || ((requiresExplicitDecision(ctx) && !isContactField) ? '' : (answerFor(ctx, profile, cv, target) || answerPlan.answers.get(`text:${i}`) || '')));
+    // The phone input's wrapper contains its sibling "Phone Country*" label,
+    // so resolve it from the control's own identity and never from context.
+    const controlIdentity = `${await el.getAttribute('name').catch(() => '') || ''} ${await el.getAttribute('id').catch(() => '') || ''}`;
+    const isPhoneInput = inputType === 'tel' || /\b(?:phone|mobile)\b/i.test(controlIdentity);
+    const value = isDataTransferConsent ? '' : (directAnswer || (isPhoneInput && profile.phone ? profile.phone : ((requiresExplicitDecision(ctx) && !isContactField) ? '' : (answerFor(ctx, profile, cv, target) || answerPlan.answers.get(`text:${i}`) || ''))));
     if (!value) continue;
     try {
       await el.fill(value);
