@@ -1,57 +1,78 @@
 #!/usr/bin/env node
 // apply-runner.mjs — background autonomous apply loop.
 //
-//   node apply-runner.mjs                     # one cycle over eligible targets
-//   node apply-runner.mjs --limit 3           # cap jobs per cycle
+//   node apply-runner.mjs                       # one cycle over eligible targets
+//   node apply-runner.mjs --limit 3             # cap jobs per cycle
 //   node apply-runner.mjs --loop --interval 30  # repeat cycles every 30 min
-//   node apply-runner.mjs --dry-run           # print the plan, spawn nothing
+//   node apply-runner.mjs --dry-run             # print the plan, spawn nothing
 //
-// Targets come from data/last-found-jobs.json (the latest discovery batch)
-// and the Pending section of data/pipeline.md. Each job runs as its OWN
-// `node autofill.mjs <url>` child so a wedged application can be SIGKILLed
-// without losing the rest of the queue. The per-job child deadline is
-// derived from the watchdog config in config/profile.yml; jobs with a
-// recent failure in data/apply-failures.tsv are skipped while in cooldown.
+// WHAT CHANGED AND WHY
+// --------------------
+// 1. QUEUE PARSING. This file used to read `data/pipeline.md` with exactly one
+//    regex requiring an em dash:
+//
+//      /^\s*- \[ \]\s+(https?:\/\/\S+)\s*—\s*(.+)$/
+//
+//    Measured against the real queue, 774 of 798 pending entries are the pipe
+//    shape the scanners write (`- [ ] url | Company | Role | Location`), so the
+//    runner saw 3 targets out of 20 and silently dropped the rest. That is the
+//    main reason "the apply flow never gets through the list" — no amount of
+//    retry logic downstream can fix a queue entry that was never read. Parsing
+//    now lives in lib/job-queue.mjs, which understands both shapes (plus
+//    freeform), dedupes by normalized URL, and skips `[x]`/`[!]` lines.
+//
+// 2. ALREADY-SUBMITTED TARGETS. A URL that `autofill.mjs` already confirmed and
+//    marked `- [x]` can still be sitting in `data/last-found-jobs.json`, so it
+//    gets filtered here too (`isPipelineDone`). Re-applying is the one mistake an
+//    autonomous runner must never make.
+//
+// 3. NO CHILD LOGS. A failed child's output was printed and then lost, so the
+//    only surviving evidence was one row in `data/apply-failures.tsv` with a
+//    reason string. Every child's full output is now written to
+//    `data/apply-runs/{date}-{company}-{hash}/runner.log`, next to the failure
+//    artifacts `autofill.mjs` captures, so a failure can be read instead of
+//    guessed at.
+//
+// Each job still runs as its OWN `node autofill.mjs <url>` child, so a wedged
+// application can be SIGKILLed without losing the rest of the queue. The child
+// deadline is derived from the watchdog config in config/profile.yml, and jobs
+// with a recent failure in data/apply-failures.tsv are skipped while in
+// cooldown.
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { watchdogConfig, recordApplyFailure, recentFailureFor } from './lib/watchdog.mjs';
+import { artifactSlug, applyRunsRoot } from './lib/failure-artifacts.mjs';
+import { isPipelineDone, readJobQueue } from './lib/job-queue.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Every queued target that still needs an application.
+ *
+ * Sources are combined by lib/job-queue.mjs (discovery output first because it
+ * is freshest, then pending pipeline entries), and anything the pipeline already
+ * records as `- [x]` is filtered out here.
+ */
 export function readTargets() {
+  const root = getCareerOpsRoot();
+  const queue = readJobQueue(root);
+  const pipelinePath = resolve(root, 'data/pipeline.md');
   const targets = [];
-  const foundPath = resolve(getCareerOpsRoot(), 'data/last-found-jobs.json');
-  if (existsSync(foundPath)) {
-    try {
-      const found = JSON.parse(readFileSync(foundPath, 'utf8'));
-      if (Array.isArray(found)) {
-        for (const job of found) {
-          if (!job?.url) continue;
-          targets.push({ name: job.name || job.company || 'Job', company: job.company || job.name || '', role: job.role || job.title || '', url: job.url });
-        }
-      }
-    } catch (error) {
-      console.warn(`  ⚠ Could not read ${foundPath}: ${error.message}`);
+  let alreadyDone = 0;
+  for (const target of queue) {
+    if (isPipelineDone(pipelinePath, target.url)) {
+      alreadyDone++;
+      continue;
     }
+    targets.push(target);
   }
-  const pipelinePath = resolve(getCareerOpsRoot(), 'data/pipeline.md');
-  if (existsSync(pipelinePath)) {
-    const source = readFileSync(pipelinePath, 'utf8');
-    for (const line of source.split(/\r?\n/)) {
-      const match = line.match(/^\s*- \[ \]\s+(https?:\/\/\S+)\s*—\s*(.+)$/);
-      if (!match) continue;
-      const description = match[2].split('(');
-      const company = description[0].trim();
-      const role = description.length > 1 ? description.slice(1).join('(').replace(/\)\s*$/, '').trim() : '';
-      targets.push({ name: company || match[1], company, role, url: match[1] });
-    }
-  }
-  const seen = new Set();
-  return targets.filter(target => (seen.has(target.url) ? false : (seen.add(target.url), true)));
+  if (alreadyDone) console.log(`  ⏭ ${alreadyDone} queued target(s) already marked submitted in data/pipeline.md; skipped.`);
+  return targets;
 }
 
 function profileForBudget() {
@@ -71,7 +92,19 @@ function childDeadlineMs(watchdog) {
   return (watchdog.job_timeout_seconds + watchdog.otp_poll_seconds * 2 + watchdog.confirm_deadline_seconds + 60) * 1000;
 }
 
+/** Where this job's child output is written. Best-effort: never fatal. */
+function runnerLogPath(target) {
+  try {
+    const dir = resolve(applyRunsRoot(getCareerOpsRoot()), artifactSlug({ company: target.company || target.name, url: target.url, reason: 'runner' }));
+    mkdirSync(dir, { recursive: true });
+    return resolve(dir, 'runner.log');
+  } catch {
+    return null;
+  }
+}
+
 function spawnJob(target, deadlineMs) {
+  const logPath = runnerLogPath(target);
   return new Promise((resolveSpawn) => {
     const child = spawn(process.execPath, ['autofill.mjs', target.url], {
       cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: process.env,
@@ -82,7 +115,10 @@ function spawnJob(target, deadlineMs) {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
-      resolveSpawn(result);
+      if (logPath) {
+        try { writeFileSync(logPath, output, 'utf8'); } catch { /* logging must not fail the run */ }
+      }
+      resolveSpawn({ ...result, logPath });
     };
     const timer = setTimeout(() => {
       console.warn(`  🔪 Runner watchdog: killing the stuck child for ${target.name || target.url} after ${Math.round(deadlineMs / 60000)} min.`);
@@ -99,7 +135,7 @@ function spawnJob(target, deadlineMs) {
 async function runCycle({ limit, dryRun }) {
   const targets = readTargets();
   if (!targets.length) {
-    console.log('No pending targets found (data/last-found-jobs.json and data/pipeline.md are both empty of URLs).');
+    console.log('No pending targets found (data/last-found-jobs.json and data/pipeline.md contain no unreached openings).');
     return { attempted: 0, skipped: 0, failed: 0, timedOut: 0, exhausted: true };
   }
   const watchdog = watchdogConfig(profileForBudget());
@@ -122,6 +158,7 @@ async function runCycle({ limit, dryRun }) {
     console.log(`\n▶ Applying to ${target.name || target.company} — ${target.role || ''}\n   ${target.url}`);
     const result = await spawnJob(target, deadlineMs);
     const elapsedMs = Date.now() - started;
+    if (result.logPath) console.log(`   log: ${result.logPath}`);
     if (result.outcome === 'ok') {
       attempted++;
       console.log(`  ✔ Child reported success for ${target.name || target.url}.`);

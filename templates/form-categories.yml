@@ -139,10 +139,19 @@ categories:
     sensitive: false
     llm_allowed: false
     question_patterns:
-      - 'authorized to work'
-      - 'work authorization'
+      - 'authoriz(?:ed|ation) to work'
+      - 'authoris(?:ed|ation) to work'
+      - 'work authoriz(?:ed|ation)'
+      - 'work authoris(?:ed|ation)'
       - 'eligible to work'
       - 'legally entitled to work'
+      - 'legally able to work'
+      - 'legal right to work'
+      - 'right to work'
+      - 'entitled to work'
+      - 'permitted to work'
+      - 'legally permitted to work'
+      - 'eligible to be employed'
     excludes:
       - 'sponsorship'
     answer:
@@ -258,6 +267,7 @@ categories:
       - 'city of residence'
       - 'current city'
       - 'based in'
+      - 'currently based'
       - 'reside in'
       - 'live in'
       - 'currently located'
@@ -300,6 +310,10 @@ categories:
       - '\bcountry\b'
       - 'country of residence'
       - 'current country'
+      - 'which country (?:are you|do you)'
+      - 'what country (?:are you|do you)'
+      - 'current (?:country|location) of residence'
+      - 'country you (?:currently )?(?:live|reside) in'
     excludes: []
     answer:
       source: profile
@@ -311,8 +325,9 @@ categories:
     sensitive: false
     llm_allowed: false
     question_patterns:
-      - 'where are you located'
-      - 'where do you live'
+      - 'where are you (?:currently )?(?:based|located|residing|living)'
+      - 'where are you'
+      - 'where do you (?:currently )?(?:live|reside|residing)'
       - 'current location'
       - '\blocation\b'
     excludes:
@@ -372,6 +387,10 @@ categories:
       - '\bname\b'
     excludes:
       - 'company'
+      # "Referral name" / "referrer name" is not the candidate's name; without
+      # this the broad \bname\b pattern claimed it and the candidate's own name
+      # was typed into a referrer field.
+      - 'refer'
       - 'manager'
       - 'reference'
       - 'emergency'
@@ -418,21 +437,35 @@ categories:
     sensitive: false
     llm_allowed: false
     question_patterns:
+      - '\blinkedin\b'
       - 'linkedin (profile|url|link|handle)'
       - '(share|provide|add|paste) your linkedin'
       - 'your linkedin'
       - 'github (profile|url|link|handle|username)'
       - 'your github'
+      - '\bportfolio\b'
       - 'portfolio (url|link|website)'
       - 'link to your portfolio'
       - 'personal website'
       - '\bwebsite\b'
       - 'link to a paper'
+      - '\btwitter\b'
       - 'twitter (profile|url|link|handle)'
       - '\bx profile\b'
       - 'blog post'
       - 'other relevant url'
-    excludes: []
+      - 'links? to (?:your )?(?:work|writing|projects)'
+      - 'personal site'
+    excludes:
+      # A sourcing question routinely embeds every option label in its own
+      # text ("…social media, LinkedIn, Instagram, X, referral, job board…").
+      # Without these excludes that text classifies as a links field, which
+      # sends a profile URL into a "how did you hear about us" dropdown.
+      - 'how did you hear'
+      - 'how did you (?:first )?(?:learn|find|know)'
+      - 'heard about'
+      - 'referral'
+      - 'job board'
     answer:
       source: profile
       key: candidate.linkedin
@@ -529,12 +562,20 @@ categories:
     question_patterns:
       - 'expected (yearly |annual )?salary'
       - 'salary expectation'
+      - '(?:desired|expected|required|target) (?:annual |yearly |base )?(?:compensation|salary|ctc|package)'
+      - '(?:annual |yearly )?(?:compensation|salary|ctc|package) (?:expectation|expectations|requirement|requirements|range|target)'
       - 'compensation expectation'
       - 'desired salary'
       - 'salary range'
+      - 'salary requirement'
       - '\bsalary\b'
+      - '\bctc\b'
+      - '\bremuneration\b'
+      - 'what (?:are|were) you (?:looking for|expecting)'
+      - 'amount you (?:are looking for|expect)'
     excludes:
       - 'salary history'
+      - 'current (?:salary|compensation|ctc|package)'
     answer:
       source: profile
       key: compensation.salary_form_policy
@@ -751,20 +792,125 @@ categories:
       key: candidate.demographics.name_pronunciation
     option_aliases: []
 
+  # ---- Additional demographics (classify so they are refused, never authored) ----
+  # These categories exist to make a question RECOGNISABLE. Their profile answer
+  # is deliberately empty and llm_allowed is false: the profile simply does not
+  # hold a date of birth or a religion, and an application answer must never be
+  # invented to fill the gap. Classifying them changes the failure from "the
+  # planner was asked and guessed" to "the apply log can say exactly which
+  # unanswerable question blocked submission".
+  - id: demographics-age
+    priority: 88
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'date of birth'
+      - '\bdob\b'
+      - '\bbirth ?date\b'
+      - '\byear of birth\b'
+      - '\bage\b'
+      - 'how old are you'
+    excludes:
+      - 'age 18'
+      - 'over 18'
+      - 'at least 18'
+      - 'years of age'
+      - 'legal age'
+      - 'age requirement'
+      - 'language'
+      - 'aged'
+    answer:
+      source: none
+    option_aliases: []
+
+  - id: demographics-religion
+    priority: 89
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - '\breligion\b'
+      - 'religious'
+      - 'faith'
+      - 'belief'
+    excludes:
+      - 'religious accommodation'
+      - 'religious holiday'
+    answer:
+      source: none
+    option_aliases: []
+
+  # ---- Skills ----
+  - id: skills-technologies
+    priority: 60
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      # LIST-shaped asks only. "Do you have experience working with cloud
+      # technologies?" is a yes/no self-assessment (skills-self-assessment);
+      # answering it with a comma-separated stack would be a different answer
+      # to a different question.
+      - 'programming languages?'
+      - 'which languages do you (?:use|code|program)'
+      - 'languages? (?:do you|you) (?:use|know|code|program)'
+      - 'tech stack'
+      - 'primary (?:programming )?(?:languages|skills)'
+      - 'which (?:languages|frameworks|tools) have you used'
+      - 'which (?:languages|frameworks|tools) are you (?:familiar|proficient)'
+      - 'list (?:the )?(?:languages|frameworks|tools|technologies)'
+      - 'skills? (?:do you have|you bring)'
+    excludes:
+      - 'spoken'
+      - 'fluent'
+      - 'language proficiency'
+      - 'human language'
+      - 'english'
+      - 'german'
+      - 'do you have experience'
+      - 'years of experience'
+    answer:
+      source: profile
+      key: form_answers.primary_programming_languages
+    option_aliases: []
+
   # ---- Sourcing ----
+  # "Who referred you?" is a DIFFERENT question from "how did you hear about
+  # us?", even though both contain the word "referral". The first asks for a
+  # person; the second asks for a channel. Sharing one bucket made the store's
+  # dominant channel answer ("Company Career Page") get pasted into a
+  # "referrer name" field. It is split out here with no answer source: the
+  # profile holds no referrer, so the field stays empty instead of wrong.
+  - id: referral-person
+    priority: 89
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'who referred'
+      - 'referred by'
+      - 'referrer'
+      - 'referral name'
+      - 'name of (?:the |your )?(?:referrer|employee)'
+      - 'employee (?:name|id).{0,20}(?:referr|refer)'
+    excludes: []
+    answer:
+      source: none
+    option_aliases: []
+
   - id: referral-source
     priority: 90
     sensitive: false
     llm_allowed: false
     question_patterns:
       - 'how did you hear'
+      - 'how did you (?:first|originally) hear'
+      - 'where did you (?:first|originally) hear'
       - 'how did you know'
       - 'heard about'
+      - 'hear about (?:us|this|the)'
       - 'first learn about'
       - 'learn about (us|this company)'
       - 'how did you find'
+      - 'source of (?:your )?application'
       - 'referral'
-      - 'who referred'
     excludes: []
     answer:
       source: profile

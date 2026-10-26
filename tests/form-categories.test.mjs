@@ -45,7 +45,10 @@ const realStems = [
   ['are you legally authorized to work in this location yes and i will not require sponsorship now or in the future yes but i will require sponsorship now', 'visa-sponsorship'],
   ['do you now or in the future require sponsorship to work in the country you currently reside in', 'visa-sponsorship'],
   ['will you require visa sponsorship to work in this role', 'visa-sponsorship'],
-  ['do you have the right to work in the united kingdom', 'work-permit'],
+  // "Right to work" is authorization, not a work-permit status: the
+  // work-authorization resolver answers it per country from
+  // location.authorized_in, while work-permit only echoes location.visa_status.
+  ['do you have the right to work in the united kingdom', 'work-authorization'],
   ['are you a citizen of the united states', 'citizenship-nationality'],
   ['what is your nationality', 'citizenship-nationality'],
   ['how many years of relevant post college work experience do you have', 'yoe-numeric'],
@@ -58,7 +61,9 @@ const realStems = [
   ['what is your highest level of education', 'education-degree'],
   ['what is your education background', 'education-degree'],
   ['what was your major', 'education-major'],
-  ['what are your primary programming languages', 'languages-primary'],
+  // "Programming languages" is a skills list, not spoken languages: the
+  // languages-primary resolver would answer "English".
+  ['what are your primary programming languages', 'skills-technologies'],
   ['what languages do you speak', 'languages-spoken'],
   ['please tell us how you heard about this opportunity', 'referral-source'],
   ['how did you hear about elevenlabs i m a user news article job board social media linkedin instagram x etc in person event referral i was reached out to other please specify', 'referral-source'],

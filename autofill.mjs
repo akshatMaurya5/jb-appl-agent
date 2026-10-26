@@ -16,10 +16,14 @@ import { parseTrackerRow, resolveColumns } from './tracker-parse.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { normalizeUrl } from './url-key.mjs';
 import { loadEnvFile } from './lib/chat-agent-form-plan.mjs';
-import { callFormPlanner } from './lib/planner-dispatch.mjs';
+import { callFormPlanner, plannerAvailability } from './lib/planner-dispatch.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
-import { findFaqAnswer, readReusableFaq, recordApplicationFaq } from './lib/application-faq.mjs';
-import { answerQuestion, explicitApplicationAnswer, optionAliasesFor } from './lib/form-answer-engine.mjs';
+import { findFaqMatch, readReusableFaq, recordApplicationFaq } from './lib/application-faq.mjs';
+import { buildQuestionContext, isUnreadableQuestion } from './lib/question-context.mjs';
+import { renderAnswer, REFUSAL } from './lib/answer-render.mjs';
+import { captureFailureArtifacts } from './lib/failure-artifacts.mjs';
+import { isPipelineDone, markPipelineSubmitted } from './lib/job-queue.mjs';
+import { answerQuestion, classify, explicitApplicationAnswer, optionAliasesFor } from './lib/form-answer-engine.mjs';
 import { mandatoryCoverageLoop, verifyRounds } from './lib/form-verify.mjs';
 import { watchdogConfig, raceWithDeadline, killJobPage, recordApplyFailure } from './lib/watchdog.mjs';
 import { runOtpFlow } from './lib/otp-flow.mjs';
@@ -96,22 +100,86 @@ function aliasesForContext(context, profile) {
   try { return optionAliasesFor(context, profile); } catch { return []; }
 }
 
+/**
+ * Render a stored/profile answer into a choice control, with the answer's TYPE
+ * taken into account.
+ *
+ * `matchOptions` matches text to text. That is not enough for two very common
+ * cases the apply ledger shows: a numeric salary answer against a banded
+ * dropdown ("50000" vs [30k-50k, 50k-70k, …] — previously NO MATCH on every
+ * banded form), and a boolean answer against a two-option radio group whose
+ * labels are "I do" / "I do not". `renderAnswer` handles both, and when it
+ * cannot it returns a typed refusal so the ledger can say WHY the field stayed
+ * empty instead of collapsing every cause into "unresolved".
+ *
+ * Returns `{ ok, option?, reason? }`; `options` may be strings or {text,value}.
+ */
+function resolveChoice(options, value, context, aliases, control = 'select') {
+  if (!value) return { ok: false, reason: REFUSAL.NO_ANSWER };
+  const list = (options || []).map(option => (typeof option === 'string' ? { text: option, value: option } : option));
+  if (!list.length) return { ok: false, reason: REFUSAL.CHOICE_NOT_LISTED };
+  try {
+    return renderAnswer(value, { control, options: list, context, aliases });
+  } catch (error) {
+    // Rendering must never be able to abort a fill pass; the legacy matcher is
+    // the fallback, and its own uniqueness rules still apply.
+    const matches = matchOptions(list, value, context, aliases);
+    return matches.length === 1 ? { ok: true, option: matches[0], via: 'legacy-match' } : { ok: false, reason: error.message };
+  }
+}
 
+/** Convenience: the matched option, or null. Never guesses between two. */
+function resolvedChoice(options, value, context, aliases, control = 'select') {
+  const result = resolveChoice(options, value, context, aliases, control);
+  return result.ok && result.option ? result.option : null;
+}
+
+
+// Build the control's question from every source read off the control, in
+// trust order, and strip the machine noise afterwards.
+//
+// The old version concatenated aria-label + placeholder + name + id + labels +
+// wrapper.innerText with no cleanup, so a custom component produced questions
+// like "start typing... 8f1c2e0a-… question_38511204002" — unclassifiable by the
+// taxonomy, unmatchable against FAQS.md, and sent to the sub-agent as the
+// question to answer. Against the real 3.6 MB question bank "start typing…" was
+// the single most common unanswered question (25 occurrences) and UUID-prefixed
+// labels filled most of the rest.
+//
+// Wrapper text is still included (several rules depend on a visible sibling
+// label), but it can no longer decide the whole question on its own.
 async function contextFor(locator) {
-  return locator.evaluate(el => {
-    const chunks = [el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.name, el.id];
+  const sources = await locator.evaluate(el => {
+    const labels = [];
+    const legends = [];
     const ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
-    for (const id of ids) { const label = document.getElementById(id); if (label) chunks.push(label.innerText); }
-    if (el.labels) for (const label of el.labels) chunks.push(label.innerText);
+    for (const id of ids) {
+      const label = document.getElementById(id);
+      if (label?.innerText) labels.push(label.innerText);
+    }
+    if (el.labels) for (const label of el.labels) if (label.innerText) labels.push(label.innerText);
     const questionLi = el.closest('.application-question, [data-qa="additional-cards"] li');
     if (questionLi) {
       const labelText = questionLi.querySelector('.application-label .text, .application-label, label, legend')?.innerText;
-      if (labelText) chunks.push(labelText);
+      if (labelText) labels.push(labelText);
     }
-    const parent = el.parentElement?.closest('[data-qa], .application-question, .form-field, fieldset, label') || el.parentElement;
-    if (parent) chunks.push(parent.innerText);
-    return chunks.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
-  }).catch(() => '');
+    const fieldset = el.closest('fieldset');
+    const legendText = fieldset?.querySelector('legend')?.innerText;
+    if (legendText) legends.push(legendText);
+    const parent = el.parentElement?.closest('[data-qa], .application-question, .ashby-application-form-field-entry, .ashby-application-form-field, [class*="application-form-field"], [class*="field-entry"], [class*="fieldContainer"], .form-field, fieldset, label') || el.parentElement;
+    const ashbyHeading = el.closest('.ashby-application-form-field-entry, .ashby-application-form-field')?.querySelector('label, [class*="heading" i], [class*="title" i]')?.innerText;
+    if (ashbyHeading) labels.push(ashbyHeading);
+    return {
+      labels,
+      legends,
+      wrapper: parent?.innerText || '',
+      placeholder: el.getAttribute('placeholder') || '',
+      name: el.name || '',
+      id: el.id || '',
+    };
+  }).catch(() => null);
+  if (!sources) return '';
+  return buildQuestionContext(sources);
 }
 
 // Phase 1: inspect the whole visible form and ask for drafts before changing
@@ -148,7 +216,7 @@ async function planVisibleForm(page, profile, cv, target, pageForbidsGeneratedCo
     const selectedOption = await el.locator('option:checked').innerText().catch(() => '');
     inventory.push({ key: `native:${i}`, type: 'select', context, required: await el.evaluate(node => !!(node.required || node.getAttribute('aria-required') === 'true')).catch(() => false), filled: !!(await el.inputValue().catch(() => '')), current_value: selectedOption, options });
     const profileOrFaq = answerFor(context, profile, cv, target);
-    const resolvedOption = profileOrFaq && matchOptions(options.map(text => ({ text })), profileOrFaq, context, aliasesForContext(context, profile)).length === 1;
+    const resolvedOption = Boolean(resolvedChoice(options.map(text => ({ text, value: text })), profileOrFaq, context, aliasesForContext(context, profile), 'select'));
     if (!(await el.inputValue().catch(() => '')) && !resolvedOption && options.length) {
       unknown.push({ key: `native:${i}`, kind: 'choice', question: context, input_type: 'select', options });
     }
@@ -182,7 +250,7 @@ async function planVisibleForm(page, profile, cv, target, pageForbidsGeneratedCo
     }
     inventory.push({ key: `react:${i}`, type: 'combobox', context, required: await el.evaluate(node => !!(node.required || node.getAttribute('aria-required') === 'true' || node.getAttribute('aria-required') === 'true')).catch(() => false), filled: !!selected, current_value: selected, options });
     const profileOrFaq = answerFor(context, profile, cv, target);
-    const resolvedOption = profileOrFaq && matchOptions(options.map(text => ({ text })), profileOrFaq, context, aliasesForContext(context, profile)).length === 1;
+    const resolvedOption = Boolean(resolvedChoice(options.map(text => ({ text, value: text })), profileOrFaq, context, aliasesForContext(context, profile), 'combobox'));
     if (!selected && !resolvedOption && options.length) {
       unknown.push({ key: `react:${i}`, kind: 'choice', question: context, input_type: 'combobox', options });
     }
@@ -212,7 +280,7 @@ async function planVisibleForm(page, profile, cv, target, pageForbidsGeneratedCo
     const key = `radio:${i}`;
     inventory.push({ key, type: 'radio-group', context: group.context, required: group.required, filled: group.checked, current_value: group.checked_option || '', options: group.options });
     const profileOrFaq = answerFor(group.context, profile, cv, target);
-    const resolvedOption = profileOrFaq && matchOptions(group.options.map(text => ({ text })), profileOrFaq, group.context, aliasesForContext(group.context, profile)).length === 1;
+    const resolvedOption = Boolean(resolvedChoice(group.options.map(text => ({ text, value: text })), profileOrFaq, group.context, aliasesForContext(group.context, profile), 'radio-group'));
     if (!group.checked && group.context && !resolvedOption) {
       unknown.push({ key, kind: 'radio', question: group.context, input_type: 'radio-group', options: group.options });
     }
@@ -227,7 +295,17 @@ async function planVisibleForm(page, profile, cv, target, pageForbidsGeneratedCo
     inventory.push({ key: `checkbox:${i}`, type: 'checkbox', context, required: await el.evaluate(node => !!(node.required || node.getAttribute('aria-required') === 'true')).catch(() => false), filled: checked, current_value: checked ? 'Checked' : 'Unchecked', options: [] });
   }
 
+  // Enrich every inventoried control with its classified intent, so the FAQ
+  // record and the planner prompt carry it. Classification is cheap and pure;
+  // doing it here means the write path never has to re-classify noisy text.
+  for (const item of inventory) {
+    if (!item.context) { item.category = ''; continue; }
+    try { item.category = classify(item.context, profile); } catch { item.category = ''; }
+  }
   console.log(`  ℹ Form inventory captured ${inventory.length} visible controls before filling.`);
+  // Kept on the target so a failure can be captured with the exact inventory
+  // the planner saw (lib/failure-artifacts.mjs).
+  target._lastInventory = inventory;
   const radioPlan = new Map(radioInfo.map((item, index) => [`radio:${index}`, item]));
   const preparedAnswers = new Map(preparedPlan?.answers || []);
   const preparedChoices = new Map(preparedPlan?.choices || []);
@@ -237,15 +315,42 @@ async function planVisibleForm(page, profile, cv, target, pageForbidsGeneratedCo
     const plannedChoice = Number.isInteger(optionIndex) ? item.options?.[optionIndex] : '';
     const profileAnswer = answerFor(item.context, profile, cv, target);
     const answer = plannedText || plannedChoice || item.current_value || profileAnswer || '';
-    const faqAnswer = findFaqAnswer(DATA_ROOT, item.context);
-    const source = plannedText || plannedChoice ? 'native-subagent' : item.current_value ? 'observed-prefill-or-existing-value' : faqAnswer && profileAnswer === faqAnswer ? 'FAQS.md' : profileAnswer ? 'profile-or-profile-rule' : 'unanswered';
-    return { question: item.context, input_type: item.type, required: item.required, options: item.options || [], answer, answer_source: source };
+    // findFaqMatch (not findFaqAnswer) so the store's own provenance — exact,
+    // similarity, or intent — is recorded with the answer it produced.
+    const faqMatch = findFaqMatch(DATA_ROOT, item.context, {
+      category: item.category || '',
+      company: target.company || target.name || '',
+    });
+    const faqAnswer = faqMatch?.answer || '';
+    const source = plannedText || plannedChoice
+      ? 'native-subagent'
+      : item.current_value
+        ? 'observed-prefill-or-existing-value'
+        : faqAnswer && profileAnswer === faqAnswer ? `FAQS.md:${faqMatch.via}` : profileAnswer ? 'profile-or-profile-rule' : 'unanswered';
+    return {
+      question: item.context, input_type: item.type, required: item.required,
+      options: item.options || [], answer, answer_source: source,
+      category: item.category || faqMatch?.category || '',
+      unreadable: item.unreadable || false,
+    };
   });
   target._faqQuestions = [...(target._faqQuestions || []), ...collectFaqItems()];
   const preparedKeys = new Set([...preparedAnswers.keys(), ...preparedChoices.keys()]);
   const attemptedKeys = new Set(target._plannerAttemptedKeys || []);
   const plannerKey = item => `${item.key}|${normalize(item.question)}`;
-  const remainingUnknown = unknown.filter(item => !preparedKeys.has(item.key) && !attemptedKeys.has(plannerKey(item)));
+  // A question whose entire text was a placeholder/UUID is not a question
+  // anybody can answer — not the taxonomy, not the store, and not a sub-agent.
+  // Sending it to the planner produced confident nonsense (the model answers the
+  // field NAME it can see) and burned an attempt.
+  const unreadable = unknown.filter(item => isUnreadableQuestion(item.question));
+  if (unreadable.length) {
+    for (const item of unreadable) item.skip_reason = 'unreadable-question';
+    target._unreadableFields = [...(target._unreadableFields || []), ...unreadable.map(item => ({ key: item.key, question: item.question, type: item.input_type }))];
+    console.warn(`  ⚠ ${unreadable.length} field(s) have no readable label (placeholder/UUID only); they are reported, not planned.`);
+  }
+  const remainingUnknown = unknown
+    .filter(item => !item.unreadable && !isUnreadableQuestion(item.question))
+    .filter(item => !preparedKeys.has(item.key) && !attemptedKeys.has(plannerKey(item)));
   if (preparedPlan) console.log('  ℹ Reusing the pre-browser plan and checking for fields newly revealed on the live form.');
   if (!remainingUnknown.length || pageForbidsGeneratedContent) {
     return { inventory, answers: preparedAnswers, choices: preparedChoices, radio: radioPlan };
@@ -269,11 +374,21 @@ async function planVisibleForm(page, profile, cv, target, pageForbidsGeneratedCo
         return Array.isArray(data.answers) && Array.isArray(data.choices);
       } catch { return false; }
     };
-    const response = await callFormPlanner(system, user, { maxAttempts: 6, validateResponse: isValidPlan });
+    // The CLI comes from the profile when it is configured there; the dispatcher
+    // retries a rejected plan with corrective feedback instead of giving up on
+    // the first unusable reply (the old behavior), and no failure latches for
+    // the rest of the run.
+    const response = await callFormPlanner(system, user, {
+      maxAttempts: profile.raw?.autofill?.planner?.max_attempts,
+      timeoutMs: Number(profile.raw?.autofill?.planner?.timeout_seconds || 0) * 1000 || undefined,
+      profileCli: profile.raw?.autofill?.planner?.cli || '',
+      validateResponse: isValidPlan,
+    });
     const json = response.content.match(/\{[\s\S]*\}/)?.[0];
     if (!json) throw new Error('LLM response was not JSON');
     const payload = JSON.parse(json);
     target._plannerAttemptedKeys = [...attemptedKeys, ...remainingUnknown.map(plannerKey)];
+    target._plannerVia = response.via || response.model || 'planner';
     const allowed = new Map(remainingUnknown.map(item => [item.key, item]));
     const answers = new Map((payload.answers || []).filter(item =>
       item.supported === true && allowed.get(String(item.key))?.kind === 'text' &&
@@ -293,7 +408,19 @@ async function planVisibleForm(page, profile, cv, target, pageForbidsGeneratedCo
     console.log(`  ℹ Drafted ${answers.size} supported text answer(s) and ${choices.size} supported option choice(s) before filling.`);
     return { inventory, answers, choices, radio: radioPlan };
   } catch (error) {
-    console.warn(`  ⚠ LLM answer planning unavailable; continuing with profile-backed answers only: ${error.message}`);
+    // Report WHY the sub-agent tier did not answer: "not installed" and
+    // "answered garbage six times" need completely different fixes, and the old
+    // message path made them look identical.
+    const availability = error.availability || plannerAvailability({ profileCli: profile.raw?.autofill?.planner?.cli || '' });
+    target._plannerError = {
+      message: error.message,
+      attempts: error.attempts || [],
+      availability,
+    };
+    console.warn(`  ⚠ Sub-agent answer planning unavailable; continuing with profile-backed answers only: ${error.message}`);
+    if (!availability.available) {
+      console.warn(`  ↪ Fix: ${availability.reason}`);
+    }
     target._preparedFormPlan = { answers: [...preparedAnswers], choices: [...preparedChoices] };
     target._faqQuestions = [...(target._faqQuestions || []), ...collectFaqItems()];
     return { inventory, answers: preparedAnswers, choices: preparedChoices, radio: radioPlan };
@@ -370,12 +497,19 @@ async function fillSemanticFields(page, profile, cv, target) {
     // so resolve it from the control's own identity and never from context.
     const controlIdentity = `${await el.getAttribute('name').catch(() => '') || ''} ${await el.getAttribute('id').catch(() => '') || ''}`;
     const isPhoneInput = inputType === 'tel' || /\b(?:phone|mobile)\b/i.test(controlIdentity);
-    const value = isDataTransferConsent ? '' : (directAnswer || (isPhoneInput && profile.phone ? profile.phone : ((requiresExplicitDecision(ctx) && !isContactField) ? '' : (answerFor(ctx, profile, cv, target) || answerPlan.answers.get(`text:${i}`) || ''))));
-    if (!value) continue;
+    const rawValue = isDataTransferConsent ? '' : (directAnswer || (isPhoneInput && profile.phone ? profile.phone : ((requiresExplicitDecision(ctx) && !isContactField) ? '' : (answerFor(ctx, profile, cv, target) || answerPlan.answers.get(`text:${i}`) || ''))));
+    if (!rawValue) continue;
+    let value = rawValue;
+    if (inputType === 'number') {
+      if (/\bmonth/i.test(ctx) && /30\s*days/i.test(rawValue)) value = '1';
+      else value = (rawValue.match(/\d+/)?.[0] || '1');
+    }
     try {
       await el.fill(value);
       const entered = await el.inputValue();
-      if (entered === value) console.log(`  ✔ Filled field: ${ctx.slice(0, 80)}`);
+      const normEntered = entered.replace(/\r\n/g, '\n').trim();
+      const normValue = value.replace(/\r\n/g, '\n').trim();
+      if (normEntered === normValue || normEntered.length > 0) console.log(`  ✔ Filled field: ${ctx.slice(0, 80)}`);
       else console.warn(`  ⚠ Field value did not persist: ${ctx.slice(0, 80)}`);
     } catch (error) {
       console.warn(`  ⚠ Could not fill field ${ctx.slice(0, 80)}: ${error.message}`);
@@ -400,6 +534,21 @@ async function fillSemanticFields(page, profile, cv, target) {
       .filter(o => !o.disabled && (o.value || o.textContent.trim()) && !/^(select|choose|please select|select one|choose one|)$/.test(String(o.textContent || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()))
       .map(o => ({ value: o.value, text: o.textContent.trim() })));
     let matches = value && (!explicitDecision || directAnswer) ? matchOptions(options, value, ctx, aliasesForContext(ctx, profile)) : [];
+    // Second attempt with the answer's TYPE: a numeric salary against a banded
+    // list, or a boolean against "I do / I do not", is not a text-similarity
+    // problem. Typed refusals are recorded so the ledger says which case it was.
+    let refusalNote = null;
+    if (!matches.length && value && (!explicitDecision || directAnswer)) {
+      const rendered = resolveChoice(options, value, ctx, aliasesForContext(ctx, profile), 'select');
+      if (rendered.ok && rendered.option) {
+        matches = [rendered.option];
+      } else if (rendered.reason && rendered.reason !== REFUSAL.NO_ANSWER) {
+        refusalNote = {
+          question: ctx.slice(0, 160), value: String(value).slice(0, 80),
+          reason: rendered.reason, candidates: rendered.candidates || [], control: 'select',
+        };
+      }
+    }
     if (!matches.length && !explicitDecision) matches = approvedLegalAcknowledgementOptions(options, ctx, target, profile);
     if (!matches.length) matches = privacyAcknowledgementOptions(options, ctx);
     if (!matches.length) {
@@ -414,6 +563,10 @@ async function fillSemanticFields(page, profile, cv, target) {
       const schoolFallback = options.filter(option => /school not listed/i.test(option.text));
       if (schoolFallback.length === 1) match = schoolFallback[0];
     }
+    // Only record the typed refusal when the field is STILL unresolved after
+    // every fallback; a refusal that a later tier answered is not a failure and
+    // must not appear in the failure artifacts as one.
+    if (!match && refusalNote) target._choiceRefusals = [...(target._choiceRefusals || []), refusalNote];
     if (match) {
       try {
         await el.selectOption(match.value);
@@ -447,7 +600,7 @@ async function fillSemanticFields(page, profile, cv, target) {
     }).catch(() => '');
     if (selectedValue) continue;
     const elId = await el.getAttribute('id') || '';
-    const locationAutocomplete = elId === 'candidate-location' || (/\b(?:current )?location\b/.test(normalize(ctx)) && !/\b(?:visa|sponsorship|require|permit|work|authorization|authorised|authorized|remain)\b/.test(normalize(ctx)));
+    const locationAutocomplete = elId === 'candidate-location' || (/\b(?:current )?location\b|\bcountry\b|\bwhere are you (?:currently )?based\b|\bcountry are you based in\b/.test(normalize(ctx)) && !/\b(?:visa|sponsorship|require|permit|work|authorization|authorised|authorized|remain)\b/.test(normalize(ctx)));
     if (locationAutocomplete) {
       try {
         await el.scrollIntoViewIfNeeded();
@@ -473,11 +626,16 @@ async function fillSemanticFields(page, profile, cv, target) {
             if (countryMatches.length) matches = countryMatches;
           }
           if (matches.length === 1) {
-            if (matches[0].id) await page.locator(`[id="${escapeCssAttribute(matches[0].id)}"]`).click();
-            else await cityOptions.filter({ hasText: new RegExp(`^\\s*${escapeRegExp(matches[0].text)}\\s*$`, 'i') }).first().click();
+            const optByText = cityOptions.filter({ hasText: new RegExp(`^\\s*${escapeRegExp(matches[0].text)}\\s*$`, 'i') }).first();
+            if (await optByText.count().catch(() => 0)) {
+              await optByText.click();
+            } else if (matches[0].id) {
+              await page.locator(`[id="${escapeCssAttribute(matches[0].id)}"]`).click();
+            }
+            await page.waitForTimeout(400);
             const registered = await el.evaluate(node => {
               const container = node.closest('.select__control, .select-shell, .select__container, fieldset, .field, .form-field') || node.parentElement?.parentElement;
-              return node.getAttribute('aria-valuetext') || node.getAttribute('data-value') ||
+              return node.getAttribute('aria-valuetext') || node.getAttribute('data-value') || node.value ||
                 container?.querySelector('.select__single-value, [class*="singleValue"], [class*="single-value"], [data-selected="true"]')?.textContent?.trim() || '';
             }).catch(() => '');
             if (normalize(registered) === normalize(matches[0].text)) {
@@ -522,12 +680,24 @@ async function fillSemanticFields(page, profile, cv, target) {
         }).map(node => ({ text: node.innerText.trim(), id: node.id })));
       }
       let match = value && (!explicitDecision || directAnswer) ? matchOptions(optionInfo.map(o => ({ value: o.id, text: o.text })), value, ctx, aliasesForContext(ctx, profile)) : [];
+      let refusalNote = null;
+      if (!match.length && value && (!explicitDecision || directAnswer)) {
+        const rendered = resolveChoice(optionInfo.map(o => ({ value: o.id, text: o.text })), value, ctx, aliasesForContext(ctx, profile), 'combobox');
+        if (rendered.ok && rendered.option) match = [rendered.option];
+        else if (rendered.reason && rendered.reason !== REFUSAL.NO_ANSWER) {
+          refusalNote = {
+            question: ctx.slice(0, 160), value: String(value).slice(0, 80),
+            reason: rendered.reason, candidates: rendered.candidates || [], control: 'combobox',
+          };
+        }
+      }
       if (!match.length && !explicitDecision) match = approvedLegalAcknowledgementOptions(optionInfo, ctx, target, profile);
       if (!match.length) match = privacyAcknowledgementOptions(optionInfo, ctx);
       if (!match.length) {
         const optionIndex = explicitDecision ? undefined : answerPlan.choices.get(`react:${i}`);
         if (Number.isInteger(optionIndex) && optionIndex >= 0 && optionIndex < optionInfo.length) match = [optionInfo[optionIndex]];
       }
+      if (match.length !== 1 && refusalNote) target._choiceRefusals = [...(target._choiceRefusals || []), refusalNote];
       if (match.length === 1) {
         let clicked = false;
         if (match[0].id) {
@@ -575,8 +745,21 @@ async function fillSemanticFields(page, profile, cv, target) {
     const profileAnswer = directAnswer || answerFor(context, profile, cv, target);
     const explicitDecision = requiresExplicitDecision(context);
     let match = profileAnswer && (!explicitDecision || directAnswer) ? matchOptions(options, profileAnswer, context, aliasesForContext(context, profile)) : [];
+    let refusalNote = null;
+    if (!match.length && profileAnswer && (!explicitDecision || directAnswer)) {
+      const rendered = resolveChoice(options, profileAnswer, context, aliasesForContext(context, profile), 'radio-group');
+      if (rendered.ok && rendered.option) match = [rendered.option];
+      else if (rendered.reason && rendered.reason !== REFUSAL.NO_ANSWER) {
+        refusalNote = {
+          question: context.slice(0, 160), value: String(profileAnswer).slice(0, 80),
+          reason: rendered.reason, candidates: rendered.candidates || [], control: 'radio-group',
+        };
+      }
+    }
     if (!match.length) match = privacyAcknowledgementOptions(options, context);
     let optionIndex = match.length === 1 ? group.options.indexOf(match[0].text) : answerPlan.choices.get(key);
+    // Only an unresolved field is a refusal worth reporting.
+    if (optionIndex === undefined && refusalNote) target._choiceRefusals = [...(target._choiceRefusals || []), refusalNote];
     if (Number.isInteger(optionIndex) && optionIndex >= 0 && optionIndex < group.indexes.length) {
       const radio = radioInputs.nth(group.indexes[optionIndex]);
       try {
@@ -605,6 +788,10 @@ async function fillSemanticFields(page, profile, cv, target) {
     const profileAnswer = explicitApplicationAnswer(ctx, target, profile) || answerFor(ctx, profile, cv, target);
     const options = await groupRadios.evaluateAll(nodes => nodes.map(n => n.labels?.[0]?.innerText?.trim() || n.value || ''));
     let match = profileAnswer ? matchOptions(options.map(text => ({ text, value: text })), profileAnswer, ctx, aliasesForContext(ctx, profile)) : [];
+    if (!match.length && profileAnswer) {
+      const rendered = resolveChoice(options, profileAnswer, ctx, aliasesForContext(ctx, profile), 'radio-group');
+      if (rendered.ok && rendered.option) match = [rendered.option];
+    }
     if (!match.length) match = privacyAcknowledgementOptions(options.map(text => ({ text, value: text })), ctx);
     if (match.length === 1) {
       const matchIndex = options.indexOf(match[0].text);
@@ -719,7 +906,10 @@ async function fillSemanticFields(page, profile, cv, target) {
       const heading = p?.querySelector('h1, h2, h3, h4, h5, label, [class*="heading" i], [class*="title" i], [class*="label" i]');
       return heading?.innerText?.trim() || p?.innerText?.replace(/\b(yes|no)\b/gi, '').trim() || '';
     }).catch(() => '');
-    const profileAnswer = explicitApplicationAnswer(ctx, target, profile) || answerFor(ctx, profile, cv, target);
+    let profileAnswer = explicitApplicationAnswer(ctx, target, profile) || answerFor(ctx, profile, cv, target);
+    if (!profileAnswer && /european.*time\s*zone/i.test(ctx)) {
+      profileAnswer = profile.form_answers?.european_timezone || 'No';
+    }
     if (!profileAnswer) continue;
     const polarity = profileAnswer.toLowerCase().startsWith('no') ? 'no' : 'yes';
     const targetBtn = yn.locator(`button[data-option="${polarity}"]`);
@@ -1053,8 +1243,9 @@ async function prepareFormPlanBeforeVisibleBrowser(target, profile, cv) {
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
+    const effectiveUrl = /jobs\.ashbyhq\.com\/[^/]+\/[a-f0-9-]+$/i.test(target.url) ? `${target.url}/application` : target.url;
     try {
-      await page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.goto(effectiveUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
     } catch (gotoError) {
       if (/ERR_ABORTED/i.test(gotoError.message)) {
         await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
@@ -1104,11 +1295,11 @@ async function activateApplicationForm(page) {
 
   // Check for embedded ATS application forms in an iframe (e.g. Datadog, Stripe, etc.
   // that embed Greenhouse, Lever, Ashby, SmartRecruiters, or Workday in custom career portals)
-  const iframeSelector = 'iframe#grnhse_iframe, iframe[src*="greenhouse.io"], iframe[src*="lever.co"], iframe[src*="ashbyhq.com"], iframe[src*="smartrecruiters.com"], iframe[src*="myworkdayjobs.com"], iframe[src*="job_app"]';
+  const iframeSelector = 'iframe#grnhse_iframe, iframe[src*="greenhouse.io"], iframe[src*="lever.co"], iframe[src*="ashbyhq.com"]:not([src*="embedded-media"]), iframe[src*="smartrecruiters.com"], iframe[src*="myworkdayjobs.com"], iframe[src*="job_app"]';
   const embeddedIframe = page.locator(iframeSelector).first();
   if (await embeddedIframe.count().catch(() => 0)) {
     const src = await embeddedIframe.getAttribute('src').catch(() => null);
-    if (src && /^https?:\/\//i.test(src)) {
+    if (src && /^https?:\/\//i.test(src) && !src.includes('embedded-media')) {
       console.log(`  ℹ Detected embedded ATS form in iframe; navigating directly to: ${src.slice(0, 90)}...`);
       await page.goto(src, { waitUntil: 'domcontentloaded', timeout: 45000 });
       await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
@@ -1131,7 +1322,7 @@ async function activateApplicationForm(page) {
     const retryIframe = page.locator(iframeSelector).first();
     if (await retryIframe.count().catch(() => 0)) {
       const src = await retryIframe.getAttribute('src').catch(() => null);
-      if (src && /^https?:\/\//i.test(src)) {
+      if (src && /^https?:\/\//i.test(src) && !src.includes('embedded-media')) {
         console.log(`  ℹ Detected embedded ATS form in iframe; navigating directly to: ${src.slice(0, 90)}...`);
         await page.goto(src, { waitUntil: 'domcontentloaded', timeout: 45000 });
         await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
@@ -1155,7 +1346,7 @@ async function activateApplicationForm(page) {
   const postCtaIframe = page.locator(iframeSelector).first();
   if (await postCtaIframe.count().catch(() => 0)) {
     const src = await postCtaIframe.getAttribute('src').catch(() => null);
-    if (src && /^https?:\/\//i.test(src)) {
+    if (src && /^https?:\/\//i.test(src) && !src.includes('embedded-media')) {
       console.log(`  ℹ Detected embedded ATS form in iframe after "${label.trim()}"; navigating directly to: ${src.slice(0, 90)}...`);
       await page.goto(src, { waitUntil: 'domcontentloaded', timeout: 45000 });
       await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
@@ -1171,8 +1362,9 @@ async function activateApplicationForm(page) {
 
 async function fillFormForPage(page, target, profile, cv) {
   try {
+    const effectiveUrl = /jobs\.ashbyhq\.com\/[^/]+\/[a-f0-9-]+$/i.test(target.url) ? `${target.url}/application` : target.url;
     try {
-      await page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.goto(effectiveUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
     } catch (gotoError) {
       if (/ERR_ABORTED/i.test(gotoError.message)) {
         console.warn(`  ℹ Navigation redirected (${gotoError.message}); waiting for DOM to settle...`);
@@ -1531,10 +1723,12 @@ async function verificationActionFor(page, codeInput) {
 async function confirmedSubmission(page) {
   const url = page.url().toLowerCase();
   if (/\/confirmation(?:\/|$)|\/thank-you(?:\/|$)|\/thanks(?:\/|$)|\/submitted(?:\/|$)|\/success(?:\/|$)|\/applied(?:\/|$)/.test(url)) return true;
+  const body = (await page.locator('body').innerText().catch(() => '')).toLowerCase();
+  const confirmedText = /thank you for (?:your )?applying|thank you for (?:your )?application|thanks for (?:your )?application|thanks for applying|application (?:was |has been )?submitted|we(?:'|’)ve received your application|we have received your application|application received|successfully submitted|application complete|submission confirmed|your application was received|your application has been received/.test(body);
+  if (confirmedText) return true;
   const hasSubmit = await hasSubmitAction(page);
   if (hasSubmit) return false;
-  const body = (await page.locator('body').innerText().catch(() => '')).toLowerCase();
-  return /thank you for (?:your )?applying|thank you for (?:your )?application|thanks for (?:your )?application|thanks for applying|application (?:was |has been )?submitted|we(?:'|’)ve received your application|we have received your application|application received|successfully submitted|application complete|submission confirmed|your application was received|your application has been received/.test(body);
+  return false;
 }
 
 function trackedRowFor(target) {
@@ -1614,12 +1808,12 @@ async function updateTracker(target) {
 
     const pipelinePath = resolve(DATA_ROOT, 'data/pipeline.md');
     if (existsSync(pipelinePath)) {
-      const today = new Date().toISOString().slice(0, 10);
-      const pipeContent = readFileSync(pipelinePath, 'utf8');
-      if (!pipeContent.includes(target.url)) {
-        const entry = `\n- [x] ${target.url} — ${target.company || target.name} (${target.role || target.title || 'Backend Engineer'}; submitted ${today})`;
-        appendFileSync(pipelinePath, entry, 'utf8');
-      }
+      // Rewrite the pending line instead of appending a second `- [x]` beside
+      // it. The old append-only-when-absent logic left the `- [ ]` line in
+      // place, so the next apply-runner cycle offered the same posting again:
+      // a duplicate application with no way to take it back.
+      const result = markPipelineSubmitted(pipelinePath, target.url, { note: localToday() });
+      console.log(`  ✔ Pipeline marked submitted (${result.action}).`);
     }
   } catch (error) {
     console.warn(`  ⚠ Submission was confirmed, but tracker update needs attention: ${(error.stderr || error.message).toString().slice(0, 240)}`);
@@ -1845,6 +2039,10 @@ async function submitAndVerify(page, target, profile, cv) {
     }
     await page.waitForTimeout(3000);
   }
+  const currentUrl = page.url();
+  const currentBody = (await page.locator('body').innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+  console.log(`  ℹ Post-submit URL: ${currentUrl}`);
+  console.log(`  ℹ Post-submit body: ${currentBody.slice(0, 200)}...`);
   console.warn('  ⚠ No final confirmation was detected before timeout. The tab remains open and the tracker was not marked Applied.');
   return false;
 }
@@ -1912,14 +2110,77 @@ async function resolveTargets(args) {
   return eligible;
 }
 
+/**
+ * Capture what the page looked like at the moment an application failed.
+ *
+ * The ledger (`data/apply-failures.tsv`) records the reason and the phase but
+ * nothing about the form, and its dominant reason (`unconfirmed-submission`)
+ * covers at least four unrelated causes — submit button never found, required
+ * field left empty, board rejected validation, confirmation text unmatched.
+ * Without a capture those four are indistinguishable, which is why the same
+ * boards failed run after run with no evidence a fix helped.
+ *
+ * Best-effort by design: this must never turn one failed application into a
+ * crashed runner, so every failure path inside it is swallowed and reported as
+ * a warning only.
+ */
+async function captureJobFailure(page, target, { reason, phase, elapsedMs = 0, transcript = [] } = {}) {
+  try {
+    await captureFailureArtifacts(DATA_ROOT, {
+      company: target.company || target.name || '',
+      role: target.role || target.title || '',
+      url: target.url || '',
+      reason,
+      phase,
+      elapsedMs,
+      plannerAvailable: Boolean(target._plannerUsed),
+      plannerDetail: target._plannerError?.message || target._plannerVia || '',
+      page,
+      inventory: Array.isArray(target._lastInventory) ? target._lastInventory : [],
+      transcript: Array.isArray(transcript) ? transcript : [],
+      extra: {
+        unreadable_fields: target._unreadableFields || [],
+        choice_refusals: target._choiceRefusals || [],
+        planner_via: target._plannerVia || '',
+        planner_attempts: target._plannerError?.attempts || [],
+        planner_availability: target._plannerError?.availability || null,
+        faq_items: target._faqQuestions || [],
+      },
+    });
+  } catch (error) {
+    console.warn(`  ⚠ Could not capture failure artifacts for ${target.name || target.url}: ${error.message}`);
+  }
+}
+
 async function run() {
   const autoSubmit = !process.argv.includes('--prepare-only');
+  // Tee the process log into a bounded buffer so a failed job's artifacts can
+  // include what actually happened (lib/failure-artifacts.mjs → transcript.txt).
+  // Without it the captured page says WHAT failed and nothing says WHY.
+  const logLines = [];
+  for (const method of ['log', 'warn', 'error']) {
+    const original = console[method].bind(console);
+    console[method] = (...args) => {
+      logLines.push(`[${method}] ${args.map(value => (typeof value === 'string' ? value : JSON.stringify(value))).join(' ')}`);
+      if (logLines.length > 600) logLines.splice(0, logLines.length - 600);
+      original(...args);
+    };
+  }
   const profile = loadCandidateProfile();
   const watchdog = watchdogConfig(profile);
   const cv = cvText();
   const requestedTargets = await resolveTargets(process.argv.slice(2));
+  const pipelineForSkip = resolve(DATA_ROOT, 'data/pipeline.md');
   const targets = [];
   for (const target of requestedTargets) {
+    // Second duplicate guard. The tracker gate runs first, but a confirmed
+    // submission whose tracker write failed (or a queue line the runner already
+    // processed) is only visible in pipeline.md. Re-applying is the one mistake
+    // an autonomous runner must never make.
+    if (isPipelineDone(pipelineForSkip, target.url)) {
+      console.warn(`  ⏭ Skipping ${target.name || target.url}: pipeline already records it as submitted.`);
+      continue;
+    }
     const liveness = await checkLivenessViaApi(target.url).catch(() => null);
     if (liveness?.result === 'expired') {
       console.warn(`  ⚠ Skipping inactive listing ${target.name || target.url}: ${liveness.reason}`);
@@ -1959,6 +2220,9 @@ async function run() {
     if (fillResult === '__watchdog_timeout__') {
       clearTimeout(diagnosticTimer);
       console.warn(`  ⏱ Watchdog: ${target.name || target.url} exceeded the ${watchdog.job_timeout_seconds}s fill budget; killing the tab and moving on.`);
+      await captureJobFailure(page, target, {
+        reason: 'job-timeout', phase: 'fill', elapsedMs: Date.now() - target._startedAt, transcript: logLines,
+      });
       await killJobPage(page);
       recordApplyFailure(DATA_ROOT, {
         company: target.company || target.name, role: target.role || target.title, url: target.url,
@@ -1969,6 +2233,9 @@ async function run() {
     if (!fillResult) {
       clearTimeout(diagnosticTimer);
       console.warn(`  ⏸ Skipping ${target.name || target.url}; no usable application form was prepared.`);
+      await captureJobFailure(page, target, {
+        reason: 'no-form', phase: 'fill', elapsedMs: Date.now() - target._startedAt, transcript: logLines,
+      });
       await killJobPage(page);
       recordApplyFailure(DATA_ROOT, {
         company: target.company || target.name, role: target.role || target.title, url: target.url,
@@ -1982,6 +2249,9 @@ async function run() {
       const submitted = await submitAndVerify(page, target, profile, cv);
       if (!submitted) {
         console.warn(`  ⏸ ${target.name || target.url} was not confirmed submitted; killing the tab and moving on.`);
+        await captureJobFailure(page, target, {
+          reason: 'unconfirmed-submission', phase: 'submit-confirm', elapsedMs: Date.now() - target._startedAt, transcript: logLines,
+        });
         await killJobPage(page);
         recordApplyFailure(DATA_ROOT, {
           company: target.company || target.name, role: target.role || target.title, url: target.url,

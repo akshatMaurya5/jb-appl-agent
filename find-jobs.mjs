@@ -18,13 +18,15 @@
  *   4. The top N go to data/last-found-jobs.json for /apply-job all.
  *
  * Usage:
- *   node find-jobs.mjs [count] [--since 14] [--keywords "go,kafka"] [--no-scan] [--json]
+ *   node find-jobs.mjs [count] [india] [--since 14] [--keywords "go,kafka"] [--no-scan] [--dry-run] [--json]
  *
- *   count        how many jobs to stage (default 5)
- *   --since N    posting freshness window in days (default 14)
- *   --keywords   extra terms that boost a title for THIS run only
- *   --no-scan    rank the existing Pending pipeline instead of scanning
- *   --json       machine-readable result on stdout
+ *   count         how many jobs to stage (default 5)
+ *   india         only include roles located in India (default: outside India)
+ *   --since N     posting freshness window in days (default 14)
+ *   --keywords    extra terms that boost a title for THIS run only
+ *   --no-scan     rank the existing Pending pipeline instead of scanning
+ *   --dry-run     rank and print without writing last-found-jobs.json
+ *   --json        machine-readable result on stdout
  *
  * Every candidate fact comes from the user layer (portals.yml, tracker,
  * profile). Nothing here hardcodes a candidate.
@@ -35,22 +37,25 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as yaml from 'js-yaml';
 import { getCareerOpsRoot } from './path-resolver.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 import { buildTitleFilter, matchedTitleKeywords } from './scan.mjs';
 
 const ROOT = getCareerOpsRoot();
 const PORTALS = join(ROOT, 'portals.yml');
 const PIPELINE = join(ROOT, 'data/pipeline.md');
 const FOUND = join(ROOT, 'data/last-found-jobs.json');
+const SCAN_HISTORY = join(ROOT, 'data/scan-history.tsv');
 
 const DEFAULTS = { count: 5, since: 14, shortlist: 3, jdTimeoutMs: 15000, jdConcurrency: 6 };
 
 function parseArgs(argv) {
-  const out = { count: null, since: DEFAULTS.since, keywords: [], noScan: false, json: false, dryRun: false };
+  const out = { count: null, since: DEFAULTS.since, keywords: [], noScan: false, json: false, dryRun: false, locationMode: 'outside-india' };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--no-scan') out.noScan = true;
     else if (arg === '--dry-run') out.dryRun = true;
     else if (arg === '--json') out.json = true;
+    else if (arg.toLowerCase() === 'india') out.locationMode = 'india';
     else if (arg === '--since') out.since = positiveInt(argv[++i], '--since');
     else if (arg.startsWith('--since=')) out.since = positiveInt(arg.slice(8), '--since');
     else if (arg === '--keywords') out.keywords.push(...splitKeywords(argv[++i]));
@@ -105,19 +110,21 @@ function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+const INDIA_CITIES = 'india|bengaluru|bangalore|hyderabad|pune|gurgaon|gurugram|noida|mumbai|chennai|delhi';
+
 function listRegex(list, fallback) {
+  if (Array.isArray(list) && list.length === 0) return /(?!)/; // explicit empty = allow all
   const entries = (Array.isArray(list) ? list : [])
     .filter(item => typeof item === 'string' && item.trim())
     .map(item => escapeRegex(item.trim()));
   const source = entries.length ? entries.join('|') : fallback;
-  return new RegExp(`\\b(?:${source})\\b`, 'i');
+  return source ? new RegExp(`\\b(?:${source})\\b`, 'i') : /(?!)/;
 }
 
-// The location policy is user-layer config; defaults mirror the skill's
-// documented policy so a portals.yml without the block still behaves.
+// The location mode is a per-run choice; international roles are the default.
 let POLICY = {
   preferred: listRegex(null, 'worldwide|global|remote'),
-  blockedOnsite: listRegex(null, 'india|bengaluru|bangalore|hyderabad|pune|gurgaon|gurugram|noida|mumbai|chennai|delhi'),
+  blockedOnsite: /(?!)/,
 };
 
 function positiveOr(value, fallback) {
@@ -153,23 +160,101 @@ function runScan(sinceDays) {
 
 // ── pipeline parsing ────────────────────────────────────────────────
 
+function loadScanHistoryDates() {
+  if (!existsSync(SCAN_HISTORY)) return new Map();
+  const map = new Map();
+  try {
+    const lines = readFileSync(SCAN_HISTORY, 'utf-8').split('\n');
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      const parts = line.split('\t');
+      let url = '';
+      let postedDate = '';
+      if (parts[0]?.startsWith('http')) {
+        url = parts[0];
+        postedDate = parts[8] || parts[1] || '';
+      } else if (parts[4]?.startsWith('http')) {
+        url = parts[4];
+        postedDate = parts[0] || '';
+      }
+      if (url && postedDate && /^\d{4}-\d{2}-\d{2}/.test(postedDate)) {
+        map.set(urlKey(url), postedDate.slice(0, 10));
+      }
+    }
+  } catch {
+    // silent
+  }
+  return map;
+}
+
 function pipelineEntries() {
   if (!existsSync(PIPELINE)) return [];
+  const historyDates = loadScanHistoryDates();
+  const seenUrls = new Set();
   const entries = [];
   for (const line of readFileSync(PIPELINE, 'utf-8').split('\n')) {
-    // `- [ ] {url} | {company} | {title} | {location?} | {comp?} | ...`
-    // Split positionally instead of regex-capturing: a lazy group followed by
-    // an optional one can stop after the first character of the title.
     // Only unchecked Pending entries are discovery candidates; `[x]` entries
     // are already processed and must never be staged again.
     if (!/^- \[ \]\s+/.test(line)) continue;
-    const parts = line.replace(/^- \[ \]\s+/, '').split(' | ');
-    if (parts.length < 3) continue;
+    const body = line.replace(/^- \[ \]\s+/, '').trim();
+    let url = '';
+    let company = '';
+    let title = '';
+    let location = '';
+    let postedDate = '';
+
+    if (body.includes(' | ')) {
+      const rawParts = body.split(' | ');
+      if (rawParts.length < 3) continue;
+      url = rawParts[0].trim();
+      company = rawParts[1].trim();
+      title = rawParts[2].trim();
+      for (let i = 3; i < rawParts.length; i++) {
+        const part = rawParts[i].trim();
+        const postedMatch = part.match(/^posted:\s*(\d{4}-\d{2}-\d{2})/i);
+        if (postedMatch) {
+          postedDate = postedMatch[1];
+        } else if (!part.startsWith('trust:') && !part.startsWith('note:') && !part.startsWith('rank:') && !part.startsWith('$') && !part.startsWith('€') && !part.startsWith('£') && !location) {
+          location = part;
+        }
+      }
+    } else if (body.includes(' — ')) {
+      // Shape: `{url} — {company} ({title}, {location})` or `{url} — {company} ({title})`
+      const dashParts = body.split(' — ');
+      if (dashParts.length < 2) continue;
+      url = dashParts[0].trim();
+      const rest = dashParts[1].trim();
+      const parenMatch = rest.match(/^([^(]+)\s*\((.*)\)$/);
+      if (parenMatch) {
+        company = parenMatch[1].trim();
+        const inside = parenMatch[2].trim();
+        const insideParts = inside.split(', ');
+        if (insideParts.length >= 2) {
+          title = insideParts[0].trim();
+          location = insideParts.slice(1).join(', ').trim();
+        } else {
+          title = inside;
+        }
+      } else {
+        company = rest;
+      }
+    }
+
+    if (!url || !company || !title) continue;
+    const key = urlKey(url);
+    if (seenUrls.has(key)) continue;
+    seenUrls.add(key);
+
+    if (!postedDate && historyDates.has(key)) {
+      postedDate = historyDates.get(key);
+    }
     entries.push({
-      url: parts[0].trim(),
-      company: parts[1].trim(),
-      title: parts[2].trim(),
-      location: (parts[3] || '').trim(),
+      url,
+      company,
+      title,
+      location,
+      postedDate: postedDate || null,
     });
   }
   return entries;
@@ -188,9 +273,17 @@ function urlKey(url) {
 // ── relevance ranking ───────────────────────────────────────────────
 
 const REMOTE_RE = /\b(?:remote|worldwide|anywhere|global(?:ly)?|distributed team|work from home)\b/i;
-const WORLDWIDE_RE = /\b(?:worldwide|global(?:ly)?|anywhere|any country|fully remote)\b/i;
+const WORLDWIDE_RE = /\b(?:worldwide|global(?:ly)?|anywhere|any country|fully remote|all locations)\b|\b(?:apj|apac|emea).*(?:apj|apac|emea|north america)\b/i;
 const SPONSOR_RE = /\b(?:visa|work permit|work authori[sz]ation|sponsor(?:ship|ed|ing)?|relocat(?:e|ion)|blue card|skilled worker|tier 2|h-?1b|employment pass|s pass|global mobility)\b/i;
 const SENIORITY_RE = /\b(?:senior|lead)\b/i;
+const INDIA_LOCATION_RE = /\b(?:india|bengaluru|bangalore|hyderabad|pune|gurgaon|gurugram|noida|mumbai|chennai|delhi)\b/i;
+
+export function locationMatchesMode(location, mode = 'outside-india') {
+  const value = String(location || '');
+  const isIndia = INDIA_LOCATION_RE.test(value);
+  if (mode === 'india') return isIndia;
+  return !isIndia || WORLDWIDE_RE.test(value);
+}
 
 function hasLocationSignal(location) {
   return Boolean(location) && !/^(?:not specified|n\/?a|unknown|—|-)$/i.test(location.trim());
@@ -217,18 +310,31 @@ function rankEntry(entry, titleFilter, extraKeywords) {
   for (const kw of extraKeywords) {
     if (title.toLowerCase().includes(kw.toLowerCase())) score += 8;
   }
+  // Freshness bonus: prioritize the latest posted jobs
+  if (entry.postedDate) {
+    const daysAgo = Math.floor((Date.now() - Date.parse(`${entry.postedDate}T00:00:00Z`)) / (1000 * 60 * 60 * 24));
+    if (daysAgo <= 3) score += 35;
+    else if (daysAgo <= 7) score += 25;
+    else if (daysAgo <= 14) score += 15;
+    else if (daysAgo <= 30) score += 5;
+  }
   // An onsite role in a blocked location (India by default) is out of the
   // location policy; worldwide/remote postings that merely name an India
   // office are not.
   if (POLICY.blockedOnsite.test(location) && !remote) score -= 1000;
-  // A KNOWN onsite location outside India with no sponsorship signal is a dead
-  // end. A missing location is ambiguous, not unsponsorable — never penalize it
-  // as if the provider had said "onsite".
-  if (locationKnown && !remote && !sponsored) score -= 60;
+
+  // An onsite role in preferred hubs (Amsterdam, Dublin, London, Berlin, etc.) is target geography
+  const inPreferredHub = locationKnown && POLICY.preferred.test(location);
+  if (inPreferredHub) score += 20;
+
+  // A KNOWN onsite location outside preferred hubs with no sponsorship signal is penalized
+  if (locationKnown && !remote && !sponsored && !inPreferredHub) score -= 60;
+
+  // Unknown/missing location gets a mild penalty so verified target hubs rank ahead
+  if (!locationKnown) score -= 15;
+
   // A country-bound "Remote" (e.g. "Remote, Spain") is not worldwide remote.
-  // Keep it reachable — sponsorship can still make it valid — but behind true
-  // global-remote postings.
-  if (remote && !worldwide && !sponsored) score -= 25;
+  if (remote && !worldwide && !sponsored && !inPreferredHub) score -= 25;
 
   return { score, matched };
 }
@@ -290,6 +396,14 @@ export function parseRequiredYears(text) {
 }
 
 function jdVerdict(entry, jd) {
+  // Zero-Lever policy: Lever boards require manual application and lack ATS API automation
+  if (entry.url.includes('lever.co')) {
+    return { ok: false, reason: 'zero-lever policy (Ashby and Greenhouse preferred)' };
+  }
+  // Clearance / Government restriction
+  if (/\b(?:security clearance|us citizen(?:ship)?|polygraph|us government|active ts\/sci)\b/i.test(`${entry.title} ${jd}`)) {
+    return { ok: false, reason: 'requires citizenship / security clearance' };
+  }
   const haystack = `${entry.title} ${entry.location} ${jd}`;
   const locationKnown = hasLocationSignal(entry.location);
   const remote = REMOTE_RE.test(entry.location);
@@ -303,16 +417,19 @@ function jdVerdict(entry, jd) {
   if (locationKnown && !remote && POLICY.blockedOnsite.test(entry.location)) {
     return { ok: false, reason: `onsite in a blocked location (${entry.location.slice(0, 50)})` };
   }
-  // Only a KNOWN onsite location demands a sponsorship signal. Missing location
-  // data stays ambiguous and passes; the apply step sees the real form.
-  if (locationKnown && !remote && !sponsored) {
-    return { ok: false, reason: 'onsite role with no visa-sponsorship/relocation signal' };
+  const noSponsorship = /\b(?:no visa sponsorship|not provide visa sponsorship|unable to sponsor|cannot sponsor|will not sponsor|without sponsorship|must be legally authorized to work|existing right to work)\b/i.test(haystack);
+  if (noSponsorship) {
+    return { ok: false, reason: 'explicitly refuses visa sponsorship' };
   }
-  // "Remote · United States" / "Remote, Spain" is country-bound, not worldwide
-  // remote. It only clears the location policy when the posting also advertises
-  // sponsorship/relocation.
-  if (locationKnown && remote && !worldwide && !sponsored
-      && /\b(?:united states|usa|u\.s\.|canada|united kingdom|uk|germany|france|spain|portugal|netherlands|amsterdam|poland|ireland|korea|japan|singapore|australia|brazil|europe|emea)\b/i.test(entry.location)) {
+
+  const inPreferredHub = POLICY.preferred.test(entry.location);
+  // An onsite role outside preferred hubs with no sponsorship signal is rejected.
+  // Within preferred hubs (e.g. Dublin, Amsterdam, London, Berlin), tier-1 tech employers sponsor unless explicitly refusing.
+  if (locationKnown && !remote && !sponsored && !inPreferredHub) {
+    return { ok: false, reason: 'onsite role outside preferred hubs with no visa-sponsorship signal' };
+  }
+  // Country-bound remote outside preferred hubs
+  if (locationKnown && remote && !worldwide && !sponsored && !inPreferredHub) {
     return { ok: false, reason: 'remote restricted to a specific country with no sponsorship signal' };
   }
   if (remote && jd) {
@@ -328,6 +445,89 @@ function jdVerdict(entry, jd) {
   };
 }
 
+function calculateShortlistScore(entry, jdVerdict) {
+  let score = 2.5;
+  const reasons = [];
+  const titleLower = entry.title.toLowerCase();
+  const jdLower = (entry.jd || '').toLowerCase();
+  const haystack = `${titleLower} ${jdLower}`;
+
+  // Tech stack match (up to +1.5)
+  const isCoreTech = /\b(?:go|golang|java|kafka|distributed|concurrency|stream(?:ing)?)\b/i.test(haystack);
+  const isPythonNodeTs = /\b(?:python|node(?:\.js)?|nodejs|typescript|javascript)\b/i.test(haystack);
+  if (isCoreTech) {
+    score += 1.5;
+    reasons.push('core stack (Go/Java/Kafka/distributed)');
+  } else if (isPythonNodeTs) {
+    score += 1.2;
+    reasons.push('Python/Node/TS stack');
+  } else if (/\b(?:backend|systems|platform|infrastructure|api)\b/i.test(titleLower)) {
+    score += 0.8;
+    reasons.push('backend/platform title');
+  } else {
+    reasons.push('no direct stack match in title/JD');
+  }
+
+  // Deduct if JD demands niche non-target languages as sole primary (e.g. Haskell, Ruby, PHP) without target stack
+  if (/\b(?:haskell|ruby|php|c#|\.net)\b/i.test(jdLower) && !/\b(?:go|golang|java|python|node|typescript|javascript)\b/i.test(jdLower)) {
+    score -= 1.8;
+    reasons.push('primary stack is outside the target set');
+  }
+
+  // YOE fit (up to +0.6)
+  if (jdVerdict.yoe) {
+    if (/\b(?:2|3)\b/.test(jdVerdict.yoe)) {
+      score += 0.6;
+      reasons.push(`YOE band ${jdVerdict.yoe} fits 2.5`);
+    } else if (/\b(?:1|4)\b/.test(jdVerdict.yoe)) {
+      score += 0.4;
+      reasons.push(`YOE band ${jdVerdict.yoe} is inside 1-5`);
+    } else if (/\b5\b/.test(jdVerdict.yoe)) {
+      score += 0.2;
+      reasons.push(`YOE band ${jdVerdict.yoe} is at the ceiling`);
+    }
+  }
+
+  // Location / Sponsorship (up to +0.4)
+  const worldwide = WORLDWIDE_RE.test(entry.location);
+  const sponsored = SPONSOR_RE.test(`${entry.location} ${jdLower}`);
+  if (worldwide || sponsored) {
+    score += 0.4;
+    reasons.push(worldwide ? 'worldwide remote' : 'sponsorship signal');
+  }
+
+  // Freshness bonus (up to +0.3)
+  if (entry.postedDate) {
+    const daysAgo = Math.floor((Date.now() - Date.parse(`${entry.postedDate}T00:00:00Z`)) / (1000 * 60 * 60 * 24));
+    if (daysAgo <= 3) {
+      score += 0.3;
+      reasons.push('posted within 3 days');
+    } else if (daysAgo <= 7) {
+      score += 0.2;
+      reasons.push('posted within a week');
+    } else if (daysAgo <= 14) {
+      score += 0.1;
+      reasons.push('posted within 2 weeks');
+    }
+  }
+
+  score = Number(Math.max(0.0, Math.min(5.0, score)).toFixed(1));
+  return { score, rationale: reasons.join('; ') };
+}
+
+function loadAppliedCompanies() {
+  const TRACKER = join(ROOT, 'data/applications.md');
+  const set = new Set(['supabase', 'elevenlabs', 'canonical']);
+  if (existsSync(TRACKER)) {
+    for (const line of readFileSync(TRACKER, 'utf-8').split('\n')) {
+      if (!line.startsWith('|') || line.startsWith('| #') || line.startsWith('|---')) continue;
+      const parts = line.split('|').map(p => p.trim());
+      if (parts[3]) set.add(parts[3].toLowerCase());
+    }
+  }
+  return set;
+}
+
 // ── main ────────────────────────────────────────────────────────────
 
 async function main() {
@@ -335,10 +535,10 @@ async function main() {
   const { titleFilter, findJobs, defaults } = loadConfig();
   POLICY = {
     preferred: listRegex(findJobs.preferred_locations, 'worldwide|global|remote'),
-    blockedOnsite: listRegex(
-      findJobs.blocked_onsite_locations,
-      'india|bengaluru|bangalore|hyderabad|pune|gurgaon|gurugram|noida|mumbai|chennai|delhi',
-    ),
+    // India is the only explicit location override; otherwise exclude India.
+    blockedOnsite: args.outsideIndia
+      ? listRegex(null, INDIA_CITIES)
+      : listRegex(findJobs.blocked_onsite_locations, null),
   };
   const count = args.count || defaults.count;
   const since = args.since || defaults.since;
@@ -374,9 +574,12 @@ async function main() {
   // Re-apply the compiled title filter: scan already gated the postings it
   // just added, but `--no-scan` reads the whole Pending inbox, where older
   // entries may predate the current positive/negative lists.
+  const appliedCompanies = loadAppliedCompanies();
   const passesTitleFilter = buildTitleFilter(titleFilter);
   const ranked = candidates
+    .filter(entry => !appliedCompanies.has(entry.company.toLowerCase()))
     .filter(entry => passesTitleFilter(entry.title))
+    .filter(entry => locationMatchesMode(entry.location, args.locationMode))
     .map(entry => {
       const { score, matched } = rankEntry(entry, titleFilter, args.keywords);
       return { ...entry, score, matched };
@@ -384,7 +587,7 @@ async function main() {
     .filter(entry => entry.score > -500)
     .sort((a, b) => b.score - a.score);
 
-  const shortlistSize = Math.min(ranked.length, count * defaults.shortlist);
+  const shortlistSize = Math.min(ranked.length, Math.max(250, count * 20));
   const shortlist = ranked.slice(0, shortlistSize);
 
   console.error(`Checking ${shortlist.length} shortlisted postings (ATS JD API, no browser)...`);
@@ -393,7 +596,17 @@ async function main() {
     return { ...entry, jd, verdict: jdVerdict(entry, jd) };
   });
 
-  const accepted = checked.filter(entry => entry.verdict.ok).slice(0, count);
+  const accepted = [];
+  const companyCounts = new Map();
+  for (const entry of checked) {
+    if (!entry.verdict.ok) continue;
+    const c = entry.company.toLowerCase();
+    const currentCount = companyCounts.get(c) || 0;
+    if (currentCount >= 1) continue;
+    companyCounts.set(c, currentCount + 1);
+    accepted.push(entry);
+    if (accepted.length >= count) break;
+  }
   const rejected = checked.filter(entry => !entry.verdict.ok);
 
   if (!accepted.length) {
@@ -402,19 +615,25 @@ async function main() {
     return;
   }
 
-  const batch = accepted.map((entry, i) => ({
-    index: i + 1,
-    name: entry.company,
-    company: entry.company,
-    role: entry.title,
-    title: entry.title,
-    url: entry.url,
-    location: entry.location || 'Not specified',
-    score: entry.score,
-    yoe: entry.verdict.yoe,
-    location_unverified: Boolean(entry.verdict.locationUnverified),
-    reason: entry.matched.length ? `matched: ${entry.matched.slice(0, 3).join(', ')}` : 'title match',
-  }));
+  const batch = accepted.map((entry, i) => {
+    const { score: shortlistScore, rationale } = calculateShortlistScore(entry, entry.verdict);
+    return {
+      index: i + 1,
+      name: entry.company,
+      company: entry.company,
+      role: entry.title,
+      title: entry.title,
+      url: entry.url,
+      location: entry.location || 'Not specified',
+      posted_date: entry.postedDate || 'Recent',
+      shortlist_score: shortlistScore,
+      score: entry.score,
+      yoe: entry.verdict.yoe,
+      location_unverified: Boolean(entry.verdict.locationUnverified),
+      score_rationale: rationale,
+      reason: entry.matched.length ? `matched: ${entry.matched.slice(0, 3).join(', ')}` : 'title match',
+    };
+  });
 
   if (!args.dryRun) writeFileSync(FOUND, `${JSON.stringify(batch, null, 2)}\n`);
 
@@ -427,6 +646,8 @@ async function main() {
   for (const job of batch) {
     console.log(`[${job.index}] ${job.company} — ${job.role}`);
     console.log(`    Location: ${job.location}${job.location_unverified ? ' (unverified — check the posting)' : ''}`);
+    console.log(`    Posted: ${job.posted_date} | Shortlist Chance: ${job.shortlist_score}/5.0`);
+    console.log(`    Score rationale: ${job.score_rationale}`);
     console.log(`    YOE: ${job.yoe} | ${job.reason}`);
     console.log(`    ${job.url}`);
   }
@@ -436,7 +657,9 @@ async function main() {
   console.log('\nApply to all with /apply-job all, or one with /apply-job <number>.');
 }
 
-main().catch(err => {
-  console.error(`find-jobs: ${err.message}`);
-  process.exitCode = 1;
-});
+if (isMainModule(import.meta.url)) {
+  main().catch(err => {
+    console.error(`find-jobs: ${err.message}`);
+    process.exitCode = 1;
+  });
+}
