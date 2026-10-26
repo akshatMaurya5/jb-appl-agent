@@ -41,6 +41,7 @@ jobs:
             // is not gitignored and may legitimately be committed.
             const USER_PATHS = [
               /^cv\.md$/,
+              /^FAQS\.md$/,
               /^config\/profile\.yml$/,
               /^config\/plugins\.yml$/,
               /^modes\/_profile\.md$/,

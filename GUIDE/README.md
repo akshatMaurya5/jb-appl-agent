@@ -56,11 +56,12 @@ Designed to eliminate manual repetitive job application chores while maintaining
 │   ├── ONBOARDING-QUESTIONS.md# Questionnaire asked to configure a new user
 │   └── WORKFLOWS.md           # Operational workflows for discovery & applying
 ├── tools/
-│   ├── fetch-verification-code.py       # Python IMAP email OTP fetcher
 │   ├── fetch-verification-code-mail.py  # macOS Mail AppleScript OTP fetcher
-│   └── gmail-mcp-server.py              # Gmail MCP server integration
+│   ├── gmail-mcp-server.py              # Gmail MCP fallback (stdio JSON-RPC)
+│   └── dry-run-apply.mjs                # Offline end-to-end apply-engine fixture driver
 ├── autofill.mjs               # Core Playwright autonomous form autofill engine
-├── openrouter-runner.mjs      # OpenRouter API client for question answering & diagnosis
+├── apply-runner.mjs           # Background autonomous apply loop (per-job children + watchdog)
+├── openrouter-runner.mjs      # OpenRouter client (scan/evaluate/pipeline only — form planning is native-only)
 ├── generate-dashboard.mjs     # Standalone interactive dashboard generator
 ├── tracker-dashboard.sh       # Shell script to open the web tracker dashboard
 ├── setup-profile.mjs          # Interactive onboarding setup assistant script

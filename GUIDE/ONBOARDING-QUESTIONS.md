@@ -15,7 +15,7 @@ When setting up `jb-appl-agent` for a new candidate, the AI assistant or user mu
 | What is your LinkedIn profile URL? | `candidate.linkedin` | LinkedIn URL, Profile link | `linkedin.com/in/yourprofile` |
 | What is your GitHub profile URL? | `candidate.github` | GitHub URL, Code samples | `github.com/yourhandle` |
 | What is your portfolio or website URL? | `candidate.portfolio_url` | Website, Portfolio, Other URL | `https://yourdomain.com` (or empty) |
-| Where is your Master Resume PDF located? | `candidate.resume_path` | Resume / CV File Upload | `/Users/.../Resume.pdf` (Absolute path) |
+| Where is your Master Resume PDF located? | `candidate.resume_path` | Resume / CV File Upload | `~/.../Resume.pdf` (absolute path) |
 
 ---
 

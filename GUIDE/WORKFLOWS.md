@@ -58,19 +58,31 @@ To apply to only one job from the discovered list:
 2. **ATS Preflight & Form Detection**: Navigates to the posting URL, verifies the posting is active, and detects application fields.
 3. **Resume PDF Upload**: Automatically attaches your master resume PDF configured in `config/profile.yml`.
 4. **Data Input & Disambiguation**:
-   - Types candidate name, email, phone with international prefix (`+91`), address, city, state, country, and postal code (`560037`).
-   - Handles React-Select comboboxes by sending keyboard events, opening the virtualized menu, and selecting exact text matches.
+   - Types candidate name, email, phone, address, city, state, country, and postal code from `config/profile.yml` (the postal value also answers PIN/ZIP labels).
+   - Handles React-Select comboboxes by sending keyboard events, opening the virtualized menu, and selecting exact text matches; location comboboxes fall back from city to a unique state option, then a unique country option, when the board has no city entry.
    - Selects demographic responses (Gender, Race, Disability, Veteran Status, Pronouns) according to your saved preferences.
    - Resolves location and visa sponsorship questions (confirming remote authorization, selecting sponsorship required for international onsite).
-5. **Open-Ended Written Essay Responses**:
-   - If the application asks narrative questions (e.g., *"Why do you want to join our team?"* or *"Describe a challenging distributed systems bug you resolved"*), the runner batches the question to OpenRouter.
-   - OpenRouter drafts grounded responses referencing only real achievements from your `cv.md` and `config/profile.yml`.
-6. **90-Second Diagnostic Guard**:
-   - If form completion has not reached the submit button within 90 seconds, the runner sends visible field states to OpenRouter to diagnose any blockers or missing fields.
-7. **5-Minute Timeout Safeguard**:
-   - If form preparation exceeds 5 minutes, the job tab is safely closed and the batch proceeds to the next job.
+5. **Answer Ladder (no external LLM tier)**:
+   - Deterministic questions are answered by the category engine (`lib/form-answer-engine.mjs`) straight from `config/profile.yml`/`cv.md`; reusable Q&A pairs come from the FAQ similarity tiers in `FAQS.md`.
+   - Leftover ordinary narrative questions (e.g., *"Why do you want to join our team?"*) go to the **active host's native sub-agent only** — never a cross-vendor CLI or an OpenRouter API call. The sub-agent drafts grounded responses referencing only real achievements from your `cv.md` and `config/profile.yml`, and returns explicit `unsupported` rather than inventing.
+6. **Two-Stage Verify Loop**:
+   - After the fill pass, the runner re-inventories the visible form, refills every still-empty required field, and re-checks — up to 3 rounds. It submits only at 100% mandatory coverage; a step that cannot get there is recorded in `data/apply-failures.tsv` and the job is skipped, never submitted half-filled.
+7. **3-Minute Watchdog & Kill-and-Advance**:
+   - If form preparation exceeds the watchdog budget (`autofill.watchdog.job_timeout_seconds`, default 180s), the job tab is closed, the failure is appended to `data/apply-failures.tsv`, and the batch proceeds to the next job. Failed jobs are skipped during the cooldown window so retry storms are impossible.
 8. **Final Submit**:
-   - Clicks the final "Submit Application" button.
+   - Clicks the final "Submit Application" button and records `Applied` only after the ATS confirms the submission.
+
+### Background Autonomous Loop (`apply-runner.mjs`)
+
+To run the whole find → apply pipeline unattended, run the background runner after a discovery batch has populated `data/last-found-jobs.json` / `data/pipeline.md`:
+
+```bash
+node apply-runner.mjs --dry-run         # print the plan, spawn nothing
+node apply-runner.mjs --limit 3         # apply to at most 3 targets, once
+node apply-runner.mjs --loop --interval 30   # repeat cycles every 30 min
+```
+
+Each target runs as its own `node autofill.mjs <url>` child process with a SIGKILL deadline derived from the watchdog config, so a wedged application can never block the queue. Targets with a recent failure in `data/apply-failures.tsv` are skipped while in cooldown.
 
 ---
 
@@ -81,10 +93,10 @@ When an ATS requires 2FA identity confirmation (such as Greenhouse's 8-character
 1. **Modal Detection**: The runner detects the OTP input modal on screen.
 2. **Inbox Polling**:
    - **macOS Mail (default)**: The runner triggers an AppleScript query via `tools/fetch-verification-code-mail.py` to check for new security code emails received after the application was launched.
-   - **Gmail IMAP**: Alternatively, connects to Gmail via `tools/fetch-verification-code.py` using your Google App Password.
-3. **Code Extraction**: Parses the security code (e.g. `K9X2P4L7`).
-4. **Input & Confirmation**: Types the code into the modal input field, submits the verification dialog, and waits for the on-page submission confirmation message.
-5. **Tracker Ledger Update**: Automatically writes an entry with status `Applied` into [`data/applications.md`](../data/applications.md).
+   - **Gmail IMAP**: Alternatively, connects to Gmail via the `gmail-assistant` MCP server (stdlib JSON-RPC server in `tools/gmail-mcp-server.py`) using your Google App Password.
+3. **Code Extraction**: Parses the security code (e.g. `K9X2P4L7`). OTPs can be numeric or alphanumeric; the runner never assumes six digits.
+4. **Input & Confirmation**: Types the code into the modal input field, submits the verification dialog, and waits for the on-page submission confirmation message. The OTP email wait is a separate 2-minute budget that does not consume the per-job budget; if no code arrives, the runner re-clicks submit once and polls a second window before giving up. A failed verify click clears the boxes and re-fetches a fresh code (max 2 attempts), and after verification the runner follows up on a still-visible submit action up to 3 times.
+5. **Tracker Ledger Update**: Writes an entry with status `Applied` into [`data/applications.md`](../data/applications.md) only after the ATS confirms the submission.
 
 ---
 

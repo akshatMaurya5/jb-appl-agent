@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Test Application — Offline Fixture (no PII)</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; color: #222; }
+  .field { margin: 1rem 0; }
+  label { display: block; font-weight: 600; margin-bottom: .25rem; }
+  input[type="text"], input[type="email"], input[type="tel"], input[type="number"], select, textarea { width: 100%; padding: .5rem; box-sizing: border-box; }
+  .suggestions { border: 1px solid #ccc; display: none; }
+  .suggestions.visible { display: block; }
+  .suggestion { padding: .4rem; cursor: pointer; }
+  .suggestion:hover { background: #eef; }
+  fieldset { border: 1px solid #ccc; padding: .75rem; }
+  .error { color: #c00; font-size: .85rem; display: none; }
+  #confirmation, #otp { display: none; margin-top: 2rem; padding: 1rem; border: 2px solid #2a2; border-radius: 6px; }
+  #otp { border-color: #c80; }
+  #otp input { width: 2.5rem; font-size: 1.5rem; text-align: center; margin-right: .35rem; }
+  #verification-error { color: #c00; display: none; }
+  #submitted-note { display: none; }
+</style>
+</head>
+<body>
+<h1>Test Application — Acme Offline Fixture</h1>
+<p>This is a local fixture for <code>tools/dry-run-apply.mjs</code>. Every value is synthetic; no candidate data lives here.</p>
+
+<form id="form">
+  <div class="field"><label for="full-name">Full name *</label><input id="full-name" type="text" required></div>
+  <div class="field"><label for="email">What is your email address? *</label><input id="email" type="email" required></div>
+  <div class="field"><label for="phone">Phone number *</label><input id="phone" type="tel" required></div>
+
+  <div class="field">
+    <label for="location-input">Where are you currently located? *</label>
+    <input id="location-input" class="location-input" type="text" autocomplete="off" required>
+    <div id="suggestions" class="suggestions"></div>
+  </div>
+
+  <div class="field"><label for="linkedin">LinkedIn profile URL</label><input id="linkedin" type="text"></div>
+  <div class="field"><label for="current-company">What company do you currently work for? *</label><input id="current-company" type="text" required></div>
+
+  <div class="field">
+    <label for="notice-period">What is your notice period? *</label>
+    <select id="notice-period" required>
+      <option value="">Select one</option>
+      <option>Immediate</option>
+      <option>30 days</option>
+      <option>60 days</option>
+      <option>90 days</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="salary">What is your expected salary? *</label>
+    <input id="salary" type="number" required>
+  </div>
+
+  <div class="field">
+    <label for="start-date">What is your earliest start date?</label>
+    <input id="start-date" type="text" placeholder="YYYY-MM-DD">
+  </div>
+
+  <div class="field">
+    <label for="university">Which university did you attend? *</label>
+    <input id="university" type="text" required>
+  </div>
+
+  <div class="field">
+    <label for="referral">How did you hear about us?</label>
+    <select id="referral">
+      <option value="">Select one</option>
+      <option>Company Career Page</option>
+      <option>LinkedIn</option>
+      <option>Referral</option>
+      <option>Job Board</option>
+    </select>
+  </div>
+
+  <fieldset id="work-auth">
+    <legend>Are you legally authorized to work in the job location? *</legend>
+    <label><input type="radio" name="work-auth" value="Yes" required> Yes</label>
+    <label><input type="radio" name="work-auth" value="No"> No</label>
+  </fieldset>
+
+  <div class="field">
+    <label for="sponsorship">Do you require visa sponsorship to work in this location? *</label>
+    <select id="sponsorship" required>
+      <option value="">Select one</option>
+      <option>Yes</option>
+      <option>No</option>
+    </select>
+  </div>
+
+  <fieldset id="languages">
+    <legend>Which languages do you speak? *</legend>
+    <label><input type="checkbox" name="languages" value="English"> English</label>
+    <label><input type="checkbox" name="languages" value="Hindi"> Hindi</label>
+    <label><input type="checkbox" name="languages" value="German"> German</label>
+  </fieldset>
+
+  <div class="field">
+    <label for="favorite-book">Tell us about your favorite book (optional)</label>
+    <textarea id="favorite-book" rows="3"></textarea>
+  </div>
+
+  <div class="field">
+    <label><input type="checkbox" id="terms" required> I understand and agree to the terms and conditions of this application. *</label>
+  </div>
+
+  <button type="submit" id="submit">Submit Application</button>
+  <div id="form-error" class="error">Please complete every required field.</div>
+</form>
+
+<div id="otp">
+  <h2>Verify it's you</h2>
+  <p>We sent a code to your email. Enter the 6-digit code.</p>
+  <div id="code-boxes">
+    <input maxlength="1" aria-label="code digit 1"><input maxlength="1" aria-label="code digit 2">
+    <input maxlength="1" aria-label="code digit 3"><input maxlength="1" aria-label="code digit 4">
+    <input maxlength="1" aria-label="code digit 5"><input maxlength="1" aria-label="code digit 6">
+  </div>
+  <div id="verification-error">Wrong code, try again.</div>
+  <button id="verify">Verify</button>
+</div>
+
+<div id="confirmation">
+  <h2>✅ Thank you for your application!</h2>
+  <p>Your application was submitted successfully.</p>
+</div>
+
+<script>
+  // A fixed location list (boards that only hire in known locations): typing
+  // the candidate's city yields no city entry, so the combobox must fall back
+  // to state → country. Only ONE entry contains the candidate's country, so
+  // the country tier is what matches — the dry-run asserts this path.
+  const SUGGESTIONS = ['Berlin, Germany', 'London, United Kingdom', 'India'];
+  const OTP_CODE = '123456';
+  window.__dryRunOtpCode = OTP_CODE;
+  const locationInput = document.getElementById('location-input');
+  const suggestionsBox = document.getElementById('suggestions');
+  locationInput.addEventListener('input', () => {
+    // Always show the full fixed list — the filter is the point of the test:
+    // no city entry exists, so the engine must land on the country tier.
+    suggestionsBox.innerHTML = SUGGESTIONS.map(item => `<div class="suggestion">${item}</div>`).join('');
+    suggestionsBox.classList.toggle('visible', SUGGESTIONS.length > 0);
+  });
+  suggestionsBox.addEventListener('mousedown', event => {
+    if (!event.target.classList.contains('suggestion')) return;
+    locationInput.value = event.target.textContent;
+    suggestionsBox.classList.remove('visible');
+  });
+
+  document.getElementById('form').addEventListener('submit', event => {
+    event.preventDefault();
+    const missing = [...document.querySelectorAll('#form [required]')].filter(el =>
+      el.type === 'checkbox' ? !el.checked : !String(el.value || '').trim());
+    if (missing.length) { document.getElementById('form-error').style.display = 'block'; return; }
+    document.getElementById('form').style.display = 'none';
+    document.getElementById('otp').style.display = 'block';
+    document.getElementById('code-boxes').querySelector('input').focus();
+  });
+
+  document.getElementById('verify').addEventListener('click', () => {
+    const code = [...document.querySelectorAll('#code-boxes input')].map(input => input.value).join('');
+    if (code !== OTP_CODE) { document.getElementById('verification-error').style.display = 'block'; return; }
+    document.getElementById('otp').style.display = 'none';
+    document.getElementById('confirmation').style.display = 'block';
+  });
+</script>
+</body>
+</html>

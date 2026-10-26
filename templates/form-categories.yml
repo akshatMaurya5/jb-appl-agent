@@ -1,0 +1,1118 @@
+# form-categories.yml — question→category taxonomy for the autonomous form engine.
+# SYSTEM LAYER (per DATA_CONTRACT.md): structure, matchers, and option aliases
+# only. Candidate answer VALUES never live here — `answer` holds a pointer
+# (a profile key path or an authorization key path) whose value the engine
+# resolves from config/profile.yml at runtime. User overrides merge in via
+# config/profile.yml → form_categories.
+#
+# Matching: `question_patterns` and `excludes` are regular expressions tested
+# against the question context after normalize() (lowercase, [a-z0-9 ] only —
+# see lib/autofill-form-utils.mjs). Patterns are matched in `priority` order
+# (lower first); `excludes` veto a category when any of them matches, so a
+# combined question falls through to the more specific category. A question
+# matching nothing lands on `unclassified`.
+#
+# Flags:
+#   sensitive   — protected-grounds, consent, legal, or eligibility territory.
+#   llm_allowed — may the native sub-agent be asked when deterministic answers
+#                 fail? Invariant: sensitive ⇒ llm_allowed: false.
+#   answer.source — profile (dot-path key below) | policy (authorization_key
+#                 must be true in the profile) | faq (similarity tiers) |
+#                 planner (native sub-agent) | cv | none.
+version: 1
+
+categories:
+  # ---- Submission attestations (always gated on explicit user authorization) ----
+  - id: terms-consent
+    priority: 10
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'terms and conditions'
+      - 'terms of (service|use)'
+      - 'agree to the terms'
+      - 'accept the terms'
+      - 'applicant agreement'
+    excludes:
+      - 'arbitrat'
+    answer:
+      source: policy
+      authorization_key: application_authorizations.required_submission_terms.all_companies
+    option_aliases:
+      - ['i agree', 'i accept', 'agree', 'accept', 'yes i agree', 'yes i accept', 'i consent']
+      - ['yes', 'ok']
+
+  - id: privacy-consent
+    priority: 11
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'privacy (policy|notice)'
+      - 'applicant privacy'
+      - 'data privacy'
+      - 'data protection'
+      - 'data processing'
+      - 'personal data'
+      - 'gdpr'
+    excludes: []
+    answer:
+      source: policy
+      authorization_key: application_authorizations.required_submission_terms.all_companies
+    option_aliases:
+      - ['i agree', 'i accept', 'agree', 'accept', 'yes i agree', 'i consent']
+      - ['i have read and acknowledge', 'i acknowledge', 'acknowledge']
+
+  - id: legal-acknowledgement
+    priority: 12
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'arbitration'
+      - 'acknowledge'
+      - 'i understand and agree'
+      - 'i certify'
+      - 'certify that'
+    excludes: []
+    answer:
+      source: policy
+      authorization_key: application_authorizations.legal_acknowledgements
+    option_aliases:
+      - ['i agree', 'i accept', 'agree', 'accept', 'acknowledge', 'confirm', 'i understand and agree']
+
+  # ---- Optional consents: no blanket authorization — FAQ precedents only ----
+  - id: consent-marketing
+    priority: 14
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'contact (me|you) about'
+      - 'future job opportunities'
+      - 'marketing'
+      - 'newsletter'
+      - 'stay in touch'
+      - 'receive updates'
+      - 'subscribe'
+    excludes: []
+    answer:
+      source: faq
+    option_aliases:
+      - ['yes', 'i agree', 'i consent', 'yes please']
+      - ['no', 'i do not agree', 'no thanks', 'opt out']
+
+  - id: consent-sms
+    priority: 15
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'text message'
+      - '\bsms\b'
+      - 'phone check'
+      - 'receive (calls|updates) about'
+    excludes: []
+    answer:
+      source: faq
+    option_aliases:
+      - ['yes', 'i agree', 'i consent']
+      - ['no', 'i do not agree', 'opt out']
+
+  - id: consent-recording
+    priority: 16
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'interview recording'
+      - 'be recorded'
+      - 'consent to be recorded'
+      - 'notetaker'
+      - 'record (the|our) interview'
+    excludes: []
+    answer:
+      source: profile
+      key: form_answers.interview_recording_consent
+    option_aliases:
+      - ['yes', 'i consent', 'i consent to be recorded', 'i agree']
+      - ['no', 'opt out', 'opt out of recording', 'i do not consent']
+
+  # ---- Eligibility (deterministic from profile; never reaches the planner) ----
+  - id: work-authorization
+    priority: 20
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'authoriz(?:ed|ation) to work'
+      - 'authoris(?:ed|ation) to work'
+      - 'work authoriz(?:ed|ation)'
+      - 'work authoris(?:ed|ation)'
+      - 'eligible to work'
+      - 'legally entitled to work'
+      - 'legally able to work'
+      - 'legal right to work'
+      - 'right to work'
+      - 'entitled to work'
+      - 'permitted to work'
+      - 'legally permitted to work'
+      - 'eligible to be employed'
+    excludes:
+      - 'sponsorship'
+    answer:
+      source: profile
+      key: location.authorized_in
+    option_aliases: []
+
+  - id: visa-sponsorship
+    priority: 21
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'require sponsorship'
+      - 'sponsorship'
+      - 'visa sponsor'
+      - 'work visa'
+      - 'h1b'
+    excludes: []
+    answer:
+      source: profile
+      key: location.needs_sponsorship
+    option_aliases:
+      - ['yes', 'yes i will require sponsorship', 'i will require sponsorship', 'yes i will need sponsorship']
+      - ['no', 'no i will not require sponsorship', 'i will not require sponsorship', 'no sponsorship needed']
+
+  - id: work-permit
+    priority: 22
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'work permit'
+      - 'employment pass'
+      - 'right to work'
+    excludes: []
+    answer:
+      source: profile
+      key: location.visa_status
+    option_aliases: []
+
+  - id: citizenship-nationality
+    priority: 23
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'citizenship'
+      - '\bcitizen\b'
+      - 'nationality'
+      - 'passport country'
+      - 'country of citizenship'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.country
+    option_aliases:
+      - ['india', 'indian']
+
+  # ---- Location / relocation ----
+  - id: relocation-willingness
+    priority: 25
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'relocate'
+      - 'relocation'
+      - 'willing to move'
+    excludes:
+      - 'office'
+    answer:
+      source: profile
+      key: location.onsite_availability
+    option_aliases:
+      - ['yes', 'yes i am willing to relocate', 'i am willing to relocate']
+      - ['no', 'no i am not willing to relocate']
+
+  - id: office-attendance
+    priority: 26
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'work from the office'
+      - 'office for a significant'
+      - 'work in (the )?office'
+      - 'work onsite'
+      - 'work remotely'
+      - 'work from home'
+      - 'work out of'
+      - 'in the office'
+      - 'office days'
+      - 'hybrid schedule'
+      - 'overlapping working hours'
+      - 'comfortable working a schedule'
+      - 'prefer to work'
+      - 'are you (open|willing|able|comfortable) to work'
+      - 'remote or (in office|onsite|hybrid)'
+      - 'in office or remote'
+      - 'hybrid or remote'
+      - 'onsite or hybrid'
+      - 'office or remote'
+    excludes: []
+    answer:
+      source: profile
+      key: compensation.location_flexibility
+    option_aliases:
+      - ['yes', 'yes i am open to working from the office', 'i am open to it']
+      - ['no', 'i prefer remote', 'remote only']
+
+  - id: location-city
+    priority: 30
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - '\bcity\b'
+      - 'city of residence'
+      - 'current city'
+      - 'based in'
+      - 'currently based'
+      - 'reside in'
+      - 'live in'
+      - 'currently located'
+    excludes:
+      - 'relocat'
+      - 'office'
+      - '\bstate\b'
+      - '\bcountry\b'
+      - '\bprovince\b'
+      - '\bcounty\b'
+      - '\bzip\b'
+      - '\bpostal\b'
+    answer:
+      source: profile
+      key: candidate.city
+    option_aliases:
+      - ['bengaluru', 'bangalore']
+
+  - id: location-state
+    priority: 31
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - '\bstate\b'
+      - 'province'
+      - 'following states'
+    excludes:
+      - 'status'
+    answer:
+      source: profile
+      key: candidate.state
+    option_aliases:
+      - ['karnataka', 'ka']
+
+  - id: location-country
+    priority: 32
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - '\bcountry\b'
+      - 'country of residence'
+      - 'current country'
+      - 'which country (?:are you|do you)'
+      - 'what country (?:are you|do you)'
+      - 'current (?:country|location) of residence'
+      - 'country you (?:currently )?(?:live|reside) in'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.country
+    option_aliases: []
+
+  - id: location-autocomplete
+    priority: 33
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'where are you (?:currently )?(?:based|located|residing|living)'
+      - 'where are you'
+      - 'where do you (?:currently )?(?:live|reside|residing)'
+      - 'current location'
+      - '\blocation\b'
+    excludes:
+      - 'relocat'
+      - 'office'
+    answer:
+      source: profile
+      key: candidate.location
+    option_aliases:
+      - ['bengaluru', 'bangalore']
+
+  - id: location-address
+    priority: 34
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'address'
+      - 'street'
+    excludes:
+      - 'email'
+      - 'ip address'
+    answer:
+      source: profile
+      key: candidate.address
+    option_aliases: []
+
+  - id: location-postal
+    priority: 35
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'postal'
+      - 'zip code'
+      - 'postcode'
+      - 'pin code'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.postal_code
+    option_aliases: []
+
+  # ---- Identity & links ----
+  - id: identity-name
+    priority: 40
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'first name'
+      - 'last name'
+      - 'full name'
+      - 'legal name'
+      - 'middle name'
+      - 'preferred name'
+      - 'given name'
+      - 'family name'
+      - 'surname'
+      - '\bname\b'
+    excludes:
+      - 'company'
+      # "Referral name" / "referrer name" is not the candidate's name; without
+      # this the broad \bname\b pattern claimed it and the candidate's own name
+      # was typed into a referrer field.
+      - 'refer'
+      - 'manager'
+      - 'reference'
+      - 'emergency'
+      - 'supervisor'
+      - 'contact'
+      - 'user'
+      - 'file'
+      - 'project'
+      - 'pronunciation'
+      - 'institution'
+      - '\bschool\b'
+      - 'university'
+      - 'college'
+      - '\bdegree\b'
+      - '\bmajor\b'
+    answer:
+      source: profile
+      key: candidate.full_name
+    option_aliases: []
+
+  - id: identity-contact
+    # Above location-*: a phone control's wrapper often includes the sibling
+    # "Phone Country*" label, which would otherwise classify the phone field
+    # as a country question and fill it with the country name.
+    priority: 15
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'email address'
+      - 'phone number'
+      - 'mobile number'
+      - 'contact number'
+      - '\bphone\b'
+      - '\bmobile\b'
+      - '\btelephone\b'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.email
+    option_aliases: []
+
+  - id: links
+    priority: 45
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - '\blinkedin\b'
+      - 'linkedin (profile|url|link|handle)'
+      - '(share|provide|add|paste) your linkedin'
+      - 'your linkedin'
+      - 'github (profile|url|link|handle|username)'
+      - 'your github'
+      - '\bportfolio\b'
+      - 'portfolio (url|link|website)'
+      - 'link to your portfolio'
+      - 'personal website'
+      - '\bwebsite\b'
+      - 'link to a paper'
+      - '\btwitter\b'
+      - 'twitter (profile|url|link|handle)'
+      - '\bx profile\b'
+      - 'blog post'
+      - 'other relevant url'
+      - 'links? to (?:your )?(?:work|writing|projects)'
+      - 'personal site'
+    excludes:
+      # A sourcing question routinely embeds every option label in its own
+      # text ("…social media, LinkedIn, Instagram, X, referral, job board…").
+      # Without these excludes that text classifies as a links field, which
+      # sends a profile URL into a "how did you hear about us" dropdown.
+      - 'how did you hear'
+      - 'how did you (?:first )?(?:learn|find|know)'
+      - 'heard about'
+      - 'referral'
+      - 'job board'
+    answer:
+      source: profile
+      key: candidate.linkedin
+    option_aliases: []
+
+  # ---- Employment context ----
+  - id: current-company
+    priority: 50
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'current employer'
+      - 'current company'
+      - 'current organization'
+      - 'currently (work|working|employed)'
+      - 'where are you currently employed'
+      - 'where were you last employed'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.current_company
+    option_aliases: []
+
+  - id: current-title
+    priority: 51
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'current title'
+      - 'current role'
+      - 'current job title'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.title
+    option_aliases: []
+
+  - id: yoe-numeric
+    priority: 55
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'how many years'
+      - 'years of (relevant |post )?(college |graduate |professional )?(work )?experience'
+      - 'post college work experience'
+      - 'post graduate experience'
+      - 'total years'
+      - 'how long have you been working remotely'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.demographics.years_of_experience
+    option_aliases: []
+
+  # ---- Timing & compensation ----
+  - id: notice-period
+    priority: 58
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'notice period'
+      - '\bnotice\b'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.demographics.notice_period
+    option_aliases:
+      - ['30 days', '4 weeks', 'one month', '1 month']
+      - ['60 days', '2 months', '8 weeks']
+      - ['90 days', '3 months', '12 weeks']
+      - ['immediate', 'immediately', '0 days', 'no notice period']
+
+  - id: start-date
+    priority: 60
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'start date'
+      - 'earliest start'
+      - 'available to start'
+      - 'when can you start'
+      - 'availability'
+    excludes:
+      - 'notice period'
+    answer:
+      source: profile
+      key: candidate.demographics.earliest_start_date
+    option_aliases: []
+
+  - id: salary-expectation
+    priority: 65
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'expected (yearly |annual )?salary'
+      - 'salary expectation'
+      - '(?:desired|expected|required|target) (?:annual |yearly |base )?(?:compensation|salary|ctc|package)'
+      - '(?:annual |yearly )?(?:compensation|salary|ctc|package) (?:expectation|expectations|requirement|requirements|range|target)'
+      - 'compensation expectation'
+      - 'desired salary'
+      - 'salary range'
+      - 'salary requirement'
+      - '\bsalary\b'
+      - '\bctc\b'
+      - '\bremuneration\b'
+      - 'what (?:are|were) you (?:looking for|expecting)'
+      - 'amount you (?:are looking for|expect)'
+    excludes:
+      - 'salary history'
+      - 'current (?:salary|compensation|ctc|package)'
+    answer:
+      source: profile
+      key: compensation.salary_form_policy
+    option_aliases:
+      - ['competitive', 'market benchmarked', 'negotiable', 'open to competitive market compensation']
+
+  # ---- Education (values parsed from cv.md Education in the engine) ----
+  - id: education-university
+    priority: 70
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'university'
+      - 'college'
+      - '\bschool\b'
+      - 'institution'
+    excludes:
+      - 'high school'
+      - 'degree'
+      - 'major'
+      - 'graduate'
+      - 'experience'
+      - 'years'
+    answer:
+      source: cv
+    option_aliases: []
+
+  - id: education-degree
+    priority: 71
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - '\bdegree\b'
+      - 'bachelor'
+      - 'b tech'
+      - 'm tech'
+      - 'master s'
+      - 'level of education'
+      - 'education level'
+      - 'highest education'
+      - 'education background'
+    excludes: []
+    answer:
+      source: cv
+    option_aliases:
+      - ['b tech', 'bachelor of technology', 'bachelor s in technology', 'bachelors of technology']
+
+  - id: education-major
+    priority: 72
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - '\bmajor\b'
+      - 'field of study'
+      - 'discipline'
+      - 'specialization'
+      - 'concentration'
+    excludes: []
+    answer:
+      source: cv
+    option_aliases: []
+
+  # ---- Languages ----
+  - id: languages-primary
+    priority: 75
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'programming languages'
+      - 'primary languages'
+      - 'coding languages'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.languages
+    option_aliases: []
+
+  - id: languages-spoken
+    priority: 76
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'languages do you speak'
+      - 'language proficiency'
+      - 'which languages'
+      - 'fluent in'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.languages
+    option_aliases: []
+
+  # ---- Demographics (protected grounds: deterministic from profile only) ----
+  - id: demographics-gender
+    priority: 80
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - '\bgender\b'
+      - '\bsex\b'
+      - 'transgender'
+    excludes:
+      - 'sexual'
+      - 'orientation'
+    answer:
+      source: profile
+      key: candidate.demographics.gender
+    option_aliases:
+      - ['man', 'male', 'm']
+      - ['woman', 'female', 'f']
+
+  - id: demographics-ethnicity
+    priority: 81
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'ethnicity'
+      - '\brace\b'
+      - 'hispanic'
+      - 'latino'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.demographics.ethnicity
+    option_aliases:
+      - ['asian indian', 'indian', 'asian', 'south asian']
+
+  - id: demographics-veteran
+    priority: 82
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'veteran'
+      - 'military'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.demographics.veteran_status
+    option_aliases:
+      - ['no', 'not a veteran', 'no i am not']
+      - ['yes', 'i am a veteran']
+
+  - id: demographics-disability
+    priority: 83
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'disability'
+      - 'neurodivergent'
+      - 'neurodiverse'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.demographics.disability
+    option_aliases:
+      - ['no', 'i do not have a disability', 'no i do not']
+      - ['yes', 'i have a disability']
+
+  - id: demographics-communities
+    priority: 84
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'communities do you'
+      - 'do you belong'
+      - 'do you identify'
+      - 'identify as'
+      - 'household earner'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.demographics
+    option_aliases:
+      - ['i prefer not to answer', 'prefer not to answer', 'prefer not to disclose', 'i do not wish to answer', 'i don t wish to answer', 'decline to answer']
+      - ['none of the above', 'none of these']
+
+  - id: demographics-orientation
+    priority: 85
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'sexual orientation'
+      - 'sexuality'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.demographics.sexual_orientation
+    option_aliases:
+      - ['heterosexual', 'straight']
+
+  - id: demographics-pronouns
+    priority: 86
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'pronoun'
+    excludes:
+      - 'pronunciation'
+    answer:
+      source: profile
+      key: candidate.demographics.pronouns
+    option_aliases:
+      - ['he him his', 'he him', 'he him they them']
+
+  - id: demographics-name-pronunciation
+    priority: 87
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'pronunciation'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.demographics.name_pronunciation
+    option_aliases: []
+
+  # ---- Additional demographics (classify so they are refused, never authored) ----
+  # These categories exist to make a question RECOGNISABLE. Their profile answer
+  # is deliberately empty and llm_allowed is false: the profile simply does not
+  # hold a date of birth or a religion, and an application answer must never be
+  # invented to fill the gap. Classifying them changes the failure from "the
+  # planner was asked and guessed" to "the apply log can say exactly which
+  # unanswerable question blocked submission".
+  - id: demographics-age
+    priority: 88
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'date of birth'
+      - '\bdob\b'
+      - '\bbirth ?date\b'
+      - '\byear of birth\b'
+      - '\bage\b'
+      - 'how old are you'
+    excludes:
+      - 'age 18'
+      - 'over 18'
+      - 'at least 18'
+      - 'years of age'
+      - 'legal age'
+      - 'age requirement'
+      - 'language'
+      - 'aged'
+    answer:
+      source: none
+    option_aliases: []
+
+  - id: demographics-religion
+    priority: 89
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - '\breligion\b'
+      - 'religious'
+      - 'faith'
+      - 'belief'
+    excludes:
+      - 'religious accommodation'
+      - 'religious holiday'
+    answer:
+      source: none
+    option_aliases: []
+
+  # ---- Skills ----
+  - id: skills-technologies
+    priority: 60
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      # LIST-shaped asks only. "Do you have experience working with cloud
+      # technologies?" is a yes/no self-assessment (skills-self-assessment);
+      # answering it with a comma-separated stack would be a different answer
+      # to a different question.
+      - 'programming languages?'
+      - 'which languages do you (?:use|code|program)'
+      - 'languages? (?:do you|you) (?:use|know|code|program)'
+      - 'tech stack'
+      - 'primary (?:programming )?(?:languages|skills)'
+      - 'which (?:languages|frameworks|tools) have you used'
+      - 'which (?:languages|frameworks|tools) are you (?:familiar|proficient)'
+      - 'list (?:the )?(?:languages|frameworks|tools|technologies)'
+      - 'skills? (?:do you have|you bring)'
+    excludes:
+      - 'spoken'
+      - 'fluent'
+      - 'language proficiency'
+      - 'human language'
+      - 'english'
+      - 'german'
+      - 'do you have experience'
+      - 'years of experience'
+    answer:
+      source: profile
+      key: form_answers.primary_programming_languages
+    option_aliases: []
+
+  # ---- Sourcing ----
+  # "Who referred you?" is a DIFFERENT question from "how did you hear about
+  # us?", even though both contain the word "referral". The first asks for a
+  # person; the second asks for a channel. Sharing one bucket made the store's
+  # dominant channel answer ("Company Career Page") get pasted into a
+  # "referrer name" field. It is split out here with no answer source: the
+  # profile holds no referrer, so the field stays empty instead of wrong.
+  - id: referral-person
+    priority: 89
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'who referred'
+      - 'referred by'
+      - 'referrer'
+      - 'referral name'
+      - 'name of (?:the |your )?(?:referrer|employee)'
+      - 'employee (?:name|id).{0,20}(?:referr|refer)'
+    excludes: []
+    answer:
+      source: none
+    option_aliases: []
+
+  - id: referral-source
+    priority: 90
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'how did you hear'
+      - 'how did you (?:first|originally) hear'
+      - 'where did you (?:first|originally) hear'
+      - 'how did you know'
+      - 'heard about'
+      - 'hear about (?:us|this|the)'
+      - 'first learn about'
+      - 'learn about (us|this company)'
+      - 'how did you find'
+      - 'source of (?:your )?application'
+      - 'referral'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.demographics.referral_source
+    option_aliases:
+      - ['company career page', 'careers page', 'company website', 'career site', 'company career site', 'careers website', 'career website']
+
+  # ---- Essays & self-assessment (planner-eligible) ----
+  - id: essay-background
+    priority: 100
+    sensitive: false
+    llm_allowed: true
+    question_patterns:
+      - 'tell us about your'
+      - 'tell us about yourself'
+      - 'describe your professional experience'
+      - 'walk us through your background'
+      - 'what is your experience (designing|building|operating)'
+      - 'resumes only tell part of the story'
+      - 'choose one to share'
+      - '\bbackground\b'
+    excludes:
+      - 'criminal'
+      - 'education'
+    answer:
+      source: planner
+    option_aliases: []
+
+  - id: essay-why-us
+    priority: 101
+    sensitive: false
+    llm_allowed: true
+    question_patterns:
+      - 'why do you want'
+      - 'why are you interested'
+      - 'why us'
+      - 'what interests you'
+      - 'what excites you'
+      - 'what makes you'
+      - 'decide to apply'
+    excludes: []
+    answer:
+      source: planner
+    option_aliases: []
+
+  - id: essay-proudest
+    priority: 102
+    sensitive: false
+    llm_allowed: true
+    question_patterns:
+      - 'proud of'
+      - 'proudest'
+      - 'most impressive'
+    excludes: []
+    answer:
+      source: planner
+    option_aliases: []
+
+  - id: skills-self-assessment
+    priority: 105
+    sensitive: false
+    llm_allowed: true
+    question_patterns:
+      - 'rate your'
+      - 'which best describes your experience'
+      - 'which best reflects your experience'
+      - 'how familiar'
+      - 'hands on experience'
+      - 'do you have experience'
+      - 'have you ever worked'
+      - 'personally designed or implemented'
+      - 'measurement evaluation'
+      - 'experience with go'
+      - 'golang experience'
+    excludes: []
+    answer:
+      source: faq
+    option_aliases: []
+
+  # ---- Misc yes/no context ----
+  - id: essay-additional
+    priority: 104
+    sensitive: false
+    llm_allowed: true
+    question_patterns:
+      - 'cover letter'
+      - 'additional information'
+      - 'anything else (you|you d|you would|you want)'
+      - 'anything you want to share'
+    excludes:
+      - 'upload'
+      - 'attach'
+    answer:
+      source: planner
+    option_aliases: []
+  - id: misc-manager-notified
+    priority: 110
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'manager'
+      - 'supervisor'
+    excludes:
+      - 'hiring manager'
+      - 'product manager'
+      - 'account manager'
+      - 'engineering manager'
+    answer:
+      source: profile
+      key: candidate.demographics.manager_notified
+    option_aliases:
+      - ['yes', 'yes my manager is aware', 'yes i have informed them']
+      - ['no', 'no my manager is not aware']
+
+  - id: misc-non-compete
+    priority: 111
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'non compete'
+      - 'restrictive covenant'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.demographics.non_compete
+    option_aliases:
+      - ['no', 'no i am not bound', 'no non compete']
+      - ['yes', 'yes i am bound']
+
+  - id: misc-previously-employed
+    priority: 112
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - 'previously (?:been )?employed'
+      - 'worked (here|for us|at this company) before'
+      - 'former employee'
+      - 'prior employment'
+    excludes: []
+    answer:
+      source: profile
+      key: candidate.demographics.previously_employed
+    option_aliases:
+      - ['no', 'no i have not', 'no i have not worked here before']
+      - ['yes', 'yes i have']
+
+  - id: misc-sanctioned
+    priority: 113
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'sanction'
+      - 'ofac'
+      - 'embargo'
+      - 'iran'
+      - 'north korea'
+      - 'syria'
+      - 'cuba'
+    excludes: []
+    answer:
+      source: profile
+      key: form_answers.based_in_sanctioned_country
+    option_aliases:
+      - ['no', 'no i am not', 'none']
+
+  - id: misc-criminal
+    priority: 114
+    sensitive: true
+    llm_allowed: false
+    question_patterns:
+      - 'criminal'
+      - 'felony'
+      - 'convict'
+    excludes: []
+    answer:
+      source: profile
+      key: form_answers.criminal_convictions
+    option_aliases:
+      - ['no', 'no i have not been convicted', 'no criminal record']
+
+  - id: misc-age-18
+    priority: 115
+    sensitive: false
+    llm_allowed: false
+    question_patterns:
+      - '(over|at least|older than|age of) 18'
+      - '18 (or older|or above)'
+      - '18 years of age'
+    excludes: []
+    answer:
+      source: profile
+      key: form_answers.age_18_plus
+    option_aliases:
+      - ['yes', 'i am 18 years of age or older', 'i am at least 18 years old']
+
+  # ---- Terminal fallback ----
+  - id: unclassified
+    priority: 999
+    sensitive: false
+    llm_allowed: true
+    question_patterns: []
+    excludes: []
+    answer:
+      source: planner
+    option_aliases: []
