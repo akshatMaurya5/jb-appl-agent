@@ -1724,7 +1724,7 @@ async function confirmedSubmission(page) {
   const url = page.url().toLowerCase();
   if (/\/confirmation(?:\/|$)|\/thank-you(?:\/|$)|\/thanks(?:\/|$)|\/submitted(?:\/|$)|\/success(?:\/|$)|\/applied(?:\/|$)/.test(url)) return true;
   const body = (await page.locator('body').innerText().catch(() => '')).toLowerCase();
-  const confirmedText = /thank you for (?:your )?applying|thank you for (?:your )?application|thanks for (?:your )?application|thanks for applying|application (?:was |has been )?submitted|we(?:'|’)ve received your application|we have received your application|application received|successfully submitted|application complete|submission confirmed|your application was received|your application has been received/.test(body);
+  const confirmedText = /thank you|thanks for|application (?:was |has been |is )?submitted|we(?:'|’)ve received your (?:application|submission)|we have received your (?:application|submission)|application received|successfully submitted|application complete|submission confirmed|your application was received|your application has been received/i.test(body);
   if (confirmedText) return true;
   const hasSubmit = await hasSubmitAction(page);
   if (hasSubmit) return false;
