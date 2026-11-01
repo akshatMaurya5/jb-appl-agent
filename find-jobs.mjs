@@ -121,9 +121,11 @@ function listRegex(list, fallback) {
   return source ? new RegExp(`\\b(?:${source})\\b`, 'i') : /(?!)/;
 }
 
+const DEFAULT_PREFERRED_HUBS = 'worldwide|global|remote|united kingdom|uk|london|united states|us|usa|new york|san francisco|seattle|austin|canada|toronto|vancouver|germany|berlin|munich|netherlands|amsterdam|france|paris|spain|madrid|barcelona|portugal|lisbon|ireland|dublin|poland|warsaw|krakow|estonia|tallinn|lithuania|vilnius|sweden|stockholm|switzerland|zurich|uae|dubai|united arab emirates|australia|sydney|melbourne|singapore|japan|tokyo';
+
 // The location mode is a per-run choice; international roles are the default.
 let POLICY = {
-  preferred: listRegex(null, 'worldwide|global|remote'),
+  preferred: listRegex(null, DEFAULT_PREFERRED_HUBS),
   blockedOnsite: /(?!)/,
 };
 
@@ -289,7 +291,7 @@ function hasLocationSignal(location) {
   return Boolean(location) && !/^(?:not specified|n\/?a|unknown|—|-)$/i.test(location.trim());
 }
 
-function rankEntry(entry, titleFilter, extraKeywords) {
+function rankEntry(entry, titleFilter, extraKeywords, isFresh = false) {
   const title = entry.title;
   const location = entry.location;
   const locationKnown = hasLocationSignal(location);
@@ -299,6 +301,7 @@ function rankEntry(entry, titleFilter, extraKeywords) {
   const specificity = matched.reduce((sum, kw) => sum + kw.replace(/^(?:word|stem):/, '').length, 0);
 
   let score = specificity + matched.length * 3;
+  if (isFresh) score += 50;
   const worldwide = WORLDWIDE_RE.test(location);
   const remote = REMOTE_RE.test(location);
   const sponsored = SPONSOR_RE.test(location);
@@ -534,9 +537,9 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const { titleFilter, findJobs, defaults } = loadConfig();
   POLICY = {
-    preferred: listRegex(findJobs.preferred_locations, 'worldwide|global|remote'),
+    preferred: listRegex(findJobs.preferred_locations, DEFAULT_PREFERRED_HUBS),
     // India is the only explicit location override; otherwise exclude India.
-    blockedOnsite: args.outsideIndia
+    blockedOnsite: args.locationMode === 'outside-india'
       ? listRegex(null, INDIA_CITIES)
       : listRegex(findJobs.blocked_onsite_locations, null),
   };
@@ -559,11 +562,20 @@ async function main() {
   }
 
   let candidates = pipelineEntries();
+  const added = new Set(addedUrls.map(urlKey));
   if (addedUrls.length) {
-    const added = new Set(addedUrls.map(urlKey));
-    candidates = candidates.filter(entry => added.has(urlKey(entry.url)));
+    candidates = candidates.filter(entry => {
+      if (added.has(urlKey(entry.url))) return true;
+      if (!entry.postedDate) return true;
+      const daysAgo = Math.floor((Date.now() - Date.parse(`${entry.postedDate}T00:00:00Z`)) / (1000 * 60 * 60 * 24));
+      return daysAgo <= since;
+    });
   } else if (!args.noScan) {
-    candidates = [];
+    candidates = candidates.filter(entry => {
+      if (!entry.postedDate) return true;
+      const daysAgo = Math.floor((Date.now() - Date.parse(`${entry.postedDate}T00:00:00Z`)) / (1000 * 60 * 60 * 24));
+      return daysAgo <= since;
+    });
   }
   if (!candidates.length) {
     console.error('No new postings matched. Try a longer window: node find-jobs.mjs 5 --since 30');
@@ -581,7 +593,8 @@ async function main() {
     .filter(entry => passesTitleFilter(entry.title))
     .filter(entry => locationMatchesMode(entry.location, args.locationMode))
     .map(entry => {
-      const { score, matched } = rankEntry(entry, titleFilter, args.keywords);
+      const isFresh = added.has(urlKey(entry.url));
+      const { score, matched } = rankEntry(entry, titleFilter, args.keywords, isFresh);
       return { ...entry, score, matched };
     })
     .filter(entry => entry.score > -500)
